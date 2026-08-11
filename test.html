@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>STK Test</title>
+</head>
+<body>
+
+<h2>M-Pesa STK Push Test</h2>
+
+<input id="phone" placeholder="Enter phone e.g. 2547XXXXXXXX" />
+<button onclick="pay()">Send STK</button>
+
+<p id="result"></p>
+
+<script>
+function pay() {
+    const phone = document.getElementById("phone").value;
+
+    if (!phone) {
+        alert("Please enter phone number");
+        return;
+    }
+
+    document.getElementById("result").innerText = "Sending STK...";
+
+    fetch("http://localhost:3000/stkpush", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ phone: phone })
+    })
+    .then(res => res.json())
+    .then(data => {
+        console.log(data);
+        document.getElementById("result").innerText = JSON.stringify(data, null, 2);
+        alert("Response received");
+    })
+    .catch(err => {
+        console.error(err);
+        document.getElementById("result").innerText = "Error: " + err.message;
+        alert("Request failed");
+    });
+}
+</script>
+
+</body>
+</html>

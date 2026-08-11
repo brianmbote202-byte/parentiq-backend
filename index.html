@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MPESA STK TEST</title>
+</head>
+<body>
+
+<h2>Pay 1 KES</h2>
+
+<input id="phone" placeholder="2547XXXXXXXX" />
+<button onclick="pay()">Pay Now</button>
+
+<script>
+function pay() {
+    const phone = document.getElementById("phone").value;
+
+    fetch("https://YOUR-NGROK-URL/stkpush", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ phone })
+    })
+    .then(res => res.json())
+    .then(data => {
+        console.log("STK RESPONSE:", data);
+        alert("Check phone for STK prompt");
+    })
+    .catch(err => console.error(err));
+}
+</script>
+
+</body>
+</html>
