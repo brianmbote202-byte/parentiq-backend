@@ -74,7 +74,10 @@ const AdminDashboardManager =
     require("./admin/AdminDashboardManager"); 
 
 const PlanManager =
-    require("./plans/PlanManager");    
+    require("./plans/PlanManager");  
+    
+const EntitlementManager =
+    require("./subscriptions/EntitlementManager");    
 
 
 
@@ -261,6 +264,10 @@ if (!plan) {
 
 
 //====================== CALLBACK ======================
+//======================================================
+// M-PESA STK CALLBACK
+//======================================================
+
 app.post("/mpesa/callback", async (req, res) => {
 
     let checkoutId = null;
@@ -268,385 +275,1004 @@ app.post("/mpesa/callback", async (req, res) => {
 
     try {
 
+        console.log("================================");
+        console.log("M-PESA STK CALLBACK");
+        console.log("================================");
+
+        console.log(
+            JSON.stringify(req.body, null, 2)
+        );
+
+
         /*
-        ==========================================
+        ==================================================
         PARSE CALLBACK
-        ==========================================
+        ==================================================
         */
 
         const stkCallback =
             req.body?.Body?.stkCallback;
 
+
         if (!stkCallback) {
 
-            return res.json({
+            console.log(
+                "Invalid STK callback payload."
+            );
 
+            return res.json({
                 ResultCode: 0,
                 ResultDesc: "Accepted"
-
             });
 
         }
+
+
+        /*
+        ==================================================
+        CALLBACK DATA
+        ==================================================
+        */
 
         checkoutId =
             stkCallback.CheckoutRequestID;
 
+        const merchantRequestId =
+            stkCallback.MerchantRequestID;
+
         const resultCode =
-            stkCallback.ResultCode;
-            
+            Number(stkCallback.ResultCode);
+
+        const resultDesc =
+            stkCallback.ResultDesc || "";
+
+
+        if (!checkoutId) {
+
+            console.log(
+                "STK callback missing CheckoutRequestID."
+            );
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        console.log(
+            "CheckoutRequestID:",
+            checkoutId
+        );
+
+        console.log(
+            "MerchantRequestID:",
+            merchantRequestId
+        );
+
+        console.log(
+            "ResultCode:",
+            resultCode
+        );
+
+        console.log(
+            "ResultDesc:",
+            resultDesc
+        );
+
+
+        /*
+        ==================================================
+        TRANSACTION REFERENCE
+        ==================================================
+        */
+
+        txRef =
+            db
+                .ref("transactions")
+                .child(checkoutId);
+
+
+        /*
+        ==================================================
+        FIRST: VERIFY TRANSACTION EXISTS
+        ==================================================
+        */
+
+        const existingSnap =
+            await txRef.once("value");
+
+
+        if (!existingSnap.exists()) {
+
+            console.error(
+                "================================"
+            );
+
+            console.error(
+                "TRANSACTION NOT FOUND"
+            );
+
+            console.error(
+                "CheckoutRequestID:",
+                checkoutId
+            );
+
+            console.error(
+                "Expected Firebase path:",
+                `transactions/${checkoutId}`
+            );
+
+            console.error(
+                "================================"
+            );
+
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        const existingTransaction =
+            existingSnap.val();
+
+
+        console.log(
+            "TRANSACTION FOUND:"
+        );
+
+        console.log(
+            JSON.stringify(
+                existingTransaction,
+                null,
+                2
+            )
+        );
+
+
+        /*
+        ==================================================
+        ALREADY PROCESSED
+        ==================================================
+        */
+
+        if (
+            existingTransaction.processed === true
+        ) {
+
+            console.log(
+                "Transaction already processed:",
+                checkoutId
+            );
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        ACQUIRE PROCESSING LOCK
+        ==================================================
+        */
+
+        const lockResult =
+            await txRef.transaction(transaction => {
+
+                /*
+                ------------------------------------------
+                TRANSACTION DISAPPEARED
+                ------------------------------------------
+                */
+
+                if (!transaction) {
+
+                    return null;
+
+                }
+
+
+                /*
+                ------------------------------------------
+                ALREADY PROCESSED
+                ------------------------------------------
+                */
+
+                if (
+                    transaction.processed === true
+                ) {
+
+                    return null;
+
+                }
+
+
+                /*
+                ------------------------------------------
+                ANOTHER PROCESS WORKING
+                ------------------------------------------
+                */
+
+                if (
+                    transaction.processing === true
+                ) {
+
+                    const startedAt =
+                        transaction.processingStartedAt || 0;
+
+                    const age =
+                        Date.now() - startedAt;
+
+
+                    /*
+                    Recover stale locks after 2 minutes.
+                    */
+
+                    if (age < 120000) {
+
+                        return null;
+
+                    }
+
+
+                    console.log(
+                        "Recovering stale transaction:",
+                        checkoutId
+                    );
+
+                }
+
+
+                /*
+                ------------------------------------------
+                ACQUIRE LOCK
+                ------------------------------------------
+                */
+
+                transaction.processing = true;
+
+                transaction.processingStartedAt =
+                    Date.now();
+
+                transaction.callbackReceivedAt =
+                    Date.now();
+
+                transaction.callbackResultCode =
+                    resultCode;
+
+                transaction.callbackResultDesc =
+                    resultDesc;
+
+
+                return transaction;
+
+            });
+
+
+        /*
+        ==================================================
+        CHECK LOCK
+        ==================================================
+        */
+
+        if (!lockResult.committed) {
+
+            console.log(
+                "Transaction lock NOT acquired:",
+                checkoutId
+            );
+
+            console.log(
+                "Current transaction state:",
+                JSON.stringify(
+                    lockResult.snapshot?.val() || null,
+                    null,
+                    2
+                )
+            );
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        LOAD LOCKED TRANSACTION
+        ==================================================
+        */
+
+        const transaction =
+            lockResult.snapshot.val();
+
+
+        if (!transaction) {
+
+            console.error(
+                "Locked transaction snapshot is empty:",
+                checkoutId
+            );
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        EXTRACT DATA
+        ==================================================
+        */
+
+        const childId =
+            transaction.childId;
+
+        const phone =
+            transaction.phone;
+
+        const planId =
+            transaction.planId;
+
+        const amount =
+            Number(transaction.amount || 0);
+
+
+        console.log(
+            "================================"
+        );
+
+        console.log(
+            "LOCK ACQUIRED"
+        );
+
+        console.log(
+            "Checkout:",
+            checkoutId
+        );
+
+        console.log(
+            "Child:",
+            childId
+        );
+
+        console.log(
+            "Plan:",
+            planId
+        );
+
+        console.log(
+            "Transaction Amount:",
+            amount
+        );
+
+        console.log(
+            "M-Pesa Result:",
+            resultCode
+        );
+
+        console.log(
+            "================================"
+        );
+
+
+        /*
+        ==================================================
+        VALIDATE TRANSACTION
+        ==================================================
+        */
+
+        if (!childId) {
+
+            await txRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                processing: false,
+
+                processingStartedAt: null,
+
+                processedAt: Date.now(),
+
+                completedAt: Date.now(),
+
+                failureReason:
+                    "MISSING_CHILD_ID"
+
+            });
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        if (!planId) {
+
+            await txRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                processing: false,
+
+                processingStartedAt: null,
+
+                processedAt: Date.now(),
+
+                completedAt: Date.now(),
+
+                failureReason:
+                    "MISSING_PLAN_ID"
+
+            });
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        LOAD PLAN
+        ==================================================
+        */
+
+        const plan =
+            await PlanManager.getPlan(planId);
+
+
+        if (!plan) {
+
+            console.error(
+                "Invalid subscription plan:",
+                planId
+            );
+
+            await txRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                processing: false,
+
+                processingStartedAt: null,
+
+                processedAt: Date.now(),
+
+                completedAt: Date.now(),
+
+                failureReason:
+                    "INVALID_PLAN"
+
+            });
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        LOAD CHILD
+        ==================================================
+        */
+
+        const childRef =
+            db
+                .ref("children")
+                .child(childId);
+
+
+        const childSnap =
+            await childRef.once("value");
+
+
+        if (!childSnap.exists()) {
+
+            console.error(
+                "Child not found:",
+                childId
+            );
+
+            await txRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                processing: false,
+
+                processingStartedAt: null,
+
+                processedAt: Date.now(),
+
+                completedAt: Date.now(),
+
+                failureReason:
+                    "CHILD_NOT_FOUND"
+
+            });
+
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+
+        }
+
+
+        const child =
+            childSnap.val();
+
 
         const now =
             Date.now();
 
-        txRef =
-            db.ref("transactions")
-                .child(checkoutId);
-
-      /*
-==========================================
-LOCK TRANSACTION
-==========================================
-*/
-
-const lockResult =
-    await txRef.transaction(transaction => {
 
         /*
-        Transaction missing.
-        */
-
-        if (!transaction) {
-
-            return transaction;
-
-        }
-
-        /*
-        Already processed.
-        */
-
-        if (transaction.processed === true) {
-
-            return;
-
-        }
-
-        /*
-        Another server is processing.
-        */
-
-        if (transaction.processing === true) {
-
-            const started =
-                transaction.processingStartedAt || 0;
-
-            const age =
-                Date.now() - started;
-
-            /*
-            Recover stale locks after 2 minutes.
-            */
-
-            if (age < 120000) {
-
-                return;
-
-            }
-
-            console.log(
-                "Recovering stale transaction:",
-                checkoutId
-            );
-
-        }
-
-        /*
-        Acquire lock.
-        */
-
-        transaction.processing = true;
-        transaction.processingStartedAt = Date.now();
-
-        return transaction;
-
-    });
-
-if (!lockResult.committed) {
-
-    console.log(
-
-        "Duplicate callback ignored:",
-
-        checkoutId
-
-    );
-
-    return res.json({
-
-        ResultCode: 0,
-
-        ResultDesc: "Already Processing"
-
-    });
-
-}
-
-const transaction =
-    lockResult.snapshot.val();
-
-const {
-
-    childId,
-
-    phone,
-
-    planId,
-
-    amount
-
-} = transaction;
-
-        /*
-        ==========================================
-        LOAD PLAN
-        ==========================================
-        */
-
-        const plan =
-    await PlanManager.getPlan(planId);
-
-if (!plan) {
-
-    console.log(
-        "Invalid plan:",
-        planId
-    );
-
-    await txRef.update({
-
-        status: "FAILED",
-
-        processed: true,
-
-        processing: false,
-
-        processedAt: now,
-
-        completedAt: now,
-
-        failureReason: "INVALID_PLAN"
-
-    });
-
-    return res.json({
-
-        ResultCode: 0,
-
-        ResultDesc: "Accepted"
-
-    });
-
-}
-
-        /*
-        ==========================================
-        LOAD CHILD
-        ==========================================
-        */
-
-        const childRef =
-            db.ref("children")
-                .child(childId);
-
-        const childSnap =
-            await childRef.get();
-
-        if (!childSnap.exists()) {
-
-    console.log(
-        "Child not found:",
-        childId
-    );
-
-    await txRef.update({
-
-        status: "FAILED",
-
-        processed: true,
-
-        processing: false,
-
-        processedAt: now,
-
-        completedAt: now,
-
-        failureReason: "CHILD_NOT_FOUND"
-
-    });
-
-    return res.json({
-
-        ResultCode: 0,
-
-        ResultDesc: "Accepted"
-
-    });
-
-}
-
-        const child = childSnap.val();
-
-        /*
-        ==========================================
+        ==================================================
         PAYMENT FAILED
-        ==========================================
+        ==================================================
         */
 
         if (resultCode !== 0) {
 
-            await childRef.child("subscription").update({
-
-                status: "FAILED",
-                premium: false
-
-            });
-
-            await childRef.child("billing").update({
-
-                lastPaymentStatus: "FAILED"
-
-            });
-
-            await txRef.update({
-
-    status: "FAILED",
-
-    processed: true,
-
-    processing: false,
-
-    processedAt: now,
-
-    completedAt: now,
-
-    callbackResultCode: resultCode
-
-});
+            console.log(
+                "================================"
+            );
 
             console.log(
-                "❌ PAYMENT FAILED:",
+                "M-PESA PAYMENT FAILED"
+            );
+
+            console.log(
+                "Child:",
                 childId
             );
 
+            console.log(
+                "Plan:",
+                planId
+            );
+
+            console.log(
+                "ResultCode:",
+                resultCode
+            );
+
+            console.log(
+                "ResultDesc:",
+                resultDesc
+            );
+
+            console.log(
+                "================================"
+            );
+
+
+            await childRef
+                .child("subscription")
+                .update({
+
+                    status: "FAILED",
+
+                    premium: false
+
+                });
+
+
+            await childRef
+                .child("billing")
+                .update({
+
+                    lastPaymentStatus:
+                        "FAILED",
+
+                    lastCheckoutId:
+                        checkoutId,
+
+                    lastPaymentError:
+                        resultDesc,
+
+                    lastPaymentResultCode:
+                        resultCode
+
+                });
+
+
+            await txRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                processing: false,
+
+                processingStartedAt: null,
+
+                processedAt: now,
+
+                completedAt: now,
+
+                callbackResultCode:
+                    resultCode,
+
+                callbackResultDesc:
+                    resultDesc
+
+            });
+
+
+            console.log(
+                "Payment failure recorded."
+            );
+
+
             return res.json({
-
                 ResultCode: 0,
-
                 ResultDesc: "Accepted"
-
             });
 
         }
 
+
         /*
-        ==========================================
+        ==================================================
         PAYMENT SUCCESS
-        ==========================================
+        ==================================================
         */
 
         console.log(
-            `🔥 ${plan.name} PAYMENT SUCCESS:`,
+            "================================"
+        );
+
+        console.log(
+            "M-PESA PAYMENT SUCCESS"
+        );
+
+        console.log(
+            "Child:",
             childId
         );
-        
+
+        console.log(
+            "Plan:",
+            plan.name
+        );
+
+        console.log(
+            "Expected Amount:",
+            amount
+        );
+
+        console.log(
+            "Checkout:",
+            checkoutId
+        );
+
+        console.log(
+            "================================"
+        );
+
 
         /*
-        --------------------------------------
-        FIND AGENT
-        --------------------------------------
+        ==================================================
+        IMPORTANT:
+        READ ACTUAL M-PESA PAYMENT METADATA
+        ==================================================
         */
-       try{
 
-        let agentId = null;
+        const callbackItems =
+            stkCallback.CallbackMetadata?.Item || [];
 
-        if (child.parentId) {
 
-            const parentSnap = await db
+        const callbackMetadata = {};
 
-                .ref("parents")
 
-                .child(child.parentId)
+        for (
+            const item of callbackItems
+        ) {
 
-                .get();
+            if (
+                item?.Name
+            ) {
 
-            if (parentSnap.exists()) {
-
-                agentId =
-                    parentSnap.val()?.referral?.agentId || null;
+                callbackMetadata[item.Name] =
+                    item.Value ?? null;
 
             }
 
         }
 
-        /*
-        --------------------------------------
-        ACTIVATE SUBSCRIPTION
-        --------------------------------------
-        */
 
-        await SubscriptionManager.activate(
+        const mpesaAmount =
+            Number(
+                callbackMetadata.Amount || 0
+            );
 
-            childId,
 
-            planId
+        const mpesaReceipt =
+            callbackMetadata.MpesaReceiptNumber ||
+            "";
 
+
+        const mpesaPhone =
+            callbackMetadata.PhoneNumber ||
+            "";
+
+
+        const transactionDate =
+            callbackMetadata.TransactionDate ||
+            null;
+
+
+        console.log(
+            "Actual M-Pesa Amount:",
+            mpesaAmount
         );
 
+        console.log(
+            "M-Pesa Receipt:",
+            mpesaReceipt
+        );
+
+        console.log(
+            "M-Pesa Phone:",
+            mpesaPhone
+        );
+
+        console.log(
+            "M-Pesa Transaction Date:",
+            transactionDate
+        );
+
+
         /*
-        --------------------------------------
-        BILLING
-        --------------------------------------
+        ==================================================
+        AMOUNT VALIDATION
+        ==================================================
         */
 
-        await childRef.child("billing").update({
+        /*
+        IMPORTANT:
 
-            phone,
+        During your current Test B we intentionally
+        paid KES 1 while the transaction says KES 750.
 
-            lastCheckoutId: checkoutId,
+        Therefore we DO NOT reject the payment here yet.
 
-            lastPaymentStatus: "SUCCESS",
+        Once production testing is complete, change this
+        into a strict amount check.
+        */
 
-            lastPaidAt: now,
+        if (
+            mpesaAmount > 0 &&
+            mpesaAmount !== amount
+        ) {
 
-            lastPlanId: planId,
+            console.warn(
+                "================================"
+            );
 
-            lastAmount: amount
+            console.warn(
+                "AMOUNT MISMATCH"
+            );
 
-        });
+            console.warn(
+                "Expected:",
+                amount
+            );
+
+            console.warn(
+                "Received:",
+                mpesaAmount
+            );
+
+            console.warn(
+                "Checkout:",
+                checkoutId
+            );
+
+            console.warn(
+                "================================"
+            );
+
+        }
+
 
         /*
-        --------------------------------------
-        PAYMENT HISTORY
-        --------------------------------------
+        ==================================================
+        FIND AGENT
+        ==================================================
+        */
+
+        let agentId = null;
+
+
+        if (child.parentId) {
+
+            const parentSnap =
+                await db
+                    .ref("parents")
+                    .child(child.parentId)
+                    .once("value");
+
+
+            if (parentSnap.exists()) {
+
+                const parent =
+                    parentSnap.val();
+
+
+                agentId =
+                    parent?.referral?.agentId ||
+                    null;
+
+            }
+
+        }
+
+
+        console.log(
+            "Agent:",
+            agentId || "NONE"
+        );
+
+
+        /*
+        ==================================================
+        ACTIVATE SUBSCRIPTION
+        ==================================================
+        */
+
+        /*
+==================================================
+ACTIVATE SUBSCRIPTION
+==================================================
+*/
+
+/*
+----------------------------------------------
+Always activate the child subscription
+----------------------------------------------
+
+This MUST remain because your child subscription
+is used by the agent/customer/payment system.
+*/
+
+await SubscriptionManager.activate(
+    childId,
+    planId
+);
+
+
+/*
+----------------------------------------------
+FAMILY PLAN
+----------------------------------------------
+
+Additionally create/update the parent-level
+Family entitlement.
+*/
+
+if (
+    planId === "family" &&
+    child.parentId
+) {
+
+    await SubscriptionManager.activateFamily(
+        child.parentId,
+        childId,
+        planId
+    );
+
+}
+
+
+        /*
+        ==================================================
+        BILLING
+        ==================================================
         */
 
         await childRef
-    .child("payments")
-    .child(checkoutId)
-    .set({
+            .child("billing")
+            .update({
 
-        amount,
-        planId,
-        checkoutId,
-        status: "SUCCESS",
-        paidAt: now
+                phone,
 
-    });
+                lastCheckoutId:
+                    checkoutId,
+
+                lastPaymentStatus:
+                    "SUCCESS",
+
+                lastPaidAt:
+                    now,
+
+                lastPlanId:
+                    planId,
+
+                lastAmount:
+                    mpesaAmount || amount,
+
+                lastPaymentResultCode:
+                    resultCode,
+
+                lastMpesaReceipt:
+                    mpesaReceipt,
+
+                lastMpesaTransactionDate:
+                    transactionDate
+
+            });
+
 
         /*
-        --------------------------------------
+        ==================================================
+        PAYMENT HISTORY
+        ==================================================
+        */
+
+        await childRef
+            .child("payments")
+            .child(checkoutId)
+            .set({
+
+                amount:
+                    mpesaAmount || amount,
+
+                expectedAmount:
+                    amount,
+
+                planId,
+
+                checkoutId,
+
+                mpesaReceipt,
+
+                mpesaPhone,
+
+                transactionDate,
+
+                status:
+                    "SUCCESS",
+
+                paidAt:
+                    now
+
+            });
+
+
+        /*
+        ==================================================
         LEDGER
-        --------------------------------------
+        ==================================================
         */
 
         await LedgerManager.record({
@@ -660,7 +1286,8 @@ if (!plan) {
             category:
                 LedgerCategory.SUBSCRIPTION,
 
-            amount,
+            amount:
+                mpesaAmount || amount,
 
             parentId:
                 child.parentId || "",
@@ -681,7 +1308,13 @@ if (!plan) {
 
                 phone,
 
-                amount,
+                amount:
+                    mpesaAmount || amount,
+
+                expectedAmount:
+                    amount,
+
+                mpesaReceipt,
 
                 paymentMethod:
                     "MPESA"
@@ -690,22 +1323,27 @@ if (!plan) {
 
         });
 
+
         /*
-        --------------------------------------
+        ==================================================
         META
-        --------------------------------------
+        ==================================================
         */
 
-        await childRef.child("meta").update({
+        await childRef
+            .child("meta")
+            .update({
 
-            updatedAt: now
+                updatedAt:
+                    now
 
-        });
+            });
+
 
         /*
-        --------------------------------------
+        ==================================================
         AGENT COMMISSION
-        --------------------------------------
+        ==================================================
         */
 
         if (agentId) {
@@ -722,212 +1360,395 @@ if (!plan) {
 
             });
 
-            if (agentId) {
 
-    await CacheManager.refreshAgent(agentId);
+            /*
+            ----------------------------------------------
+            CACHE
+            ----------------------------------------------
+            */
 
-    console.log(
-        "Payment synchronization completed:",
-        agentId
-    );
+            try {
 
-}
+                await CacheManager.refreshAgent(
+                    agentId
+                );
 
-            DashboardCache.clear(agentId);
+            }
 
-             console.log(
-                "Dashboard cache cleared:",
-                agentId
-            );
+            catch (cacheError) {
 
-        
+                console.error(
+                    "Agent cache refresh failed:",
+                    cacheError.message
+                );
+
+            }
+
+
+            try {
+
+                DashboardCache.clear(
+                    agentId
+                );
+
+            }
+
+            catch (cacheError) {
+
+                console.error(
+                    "Dashboard cache clear failed:",
+                    cacheError.message
+                );
+
+            }
+
         }
-        
+
 
         /*
-        --------------------------------------
+        ==================================================
         MARK TRANSACTION COMPLETE
-        --------------------------------------
+        ==================================================
         */
 
-        }
-catch (processingError) {
+        await txRef.update({
 
-    console.error(
-        "Payment processing failed:",
-        processingError
-    );
+            status:
+                "SUCCESS",
 
-    await txRef.update({
+            processed:
+                true,
 
-        processing: false,
+            processing:
+                false,
 
-        processingStartedAt: null,
+            processingStartedAt:
+                null,
 
-        lastError: processingError.message,
+            processedAt:
+                now,
 
-        retryCount:
-            (transaction.retryCount || 0) + 1
+            completedAt:
+                now,
 
-    });
+            callbackResultCode:
+                resultCode,
 
-    throw processingError;
+            callbackResultDesc:
+                resultDesc,
 
-}
+            mpesaAmount,
 
-await txRef.update({
+            mpesaReceipt,
 
-    status: "SUCCESS",
+            mpesaPhone,
 
-    processed: true,
-
-    processing: false,
-
-    processedAt: now,
-
-    completedAt: now,
-
-    callbackResultCode: resultCode
-
-});
-
-    
-
-        console.log("================================");
-        console.log("PAYMENT COMPLETED");
-        console.log("================================");
-
-        console.log("Child:", childId);
-        console.log("Plan:", planId);
-        console.log("Amount:", amount);
-
-        return res.json({
-
-            ResultCode: 0,
-
-            ResultDesc: "Accepted"
+            mpesaTransactionDate:
+                transactionDate
 
         });
 
-    }
 
-    
+        /*
+        ==================================================
+        FINAL LOG
+        ==================================================
+        */
 
-    catch (err) {
-
-    console.log("================================");
-    console.log("CALLBACK FAILED");
-    console.log("================================");
-
-    console.error(err);
-
-    try {
-
-        if (checkoutId) {
-    await db.ref("transactions")
-        .child(checkoutId)
-        .update({
-            processing: false,
-            processingStartedAt: null
-        });
-}
-
-    } catch (unlockError) {
-
-        console.error(
-            "Failed to unlock transaction:",
-            unlockError
+        console.log(
+            "================================"
         );
 
+        console.log(
+            "PAYMENT COMPLETED"
+        );
+
+        console.log(
+            "Child:",
+            childId
+        );
+
+        console.log(
+            "Plan:",
+            planId
+        );
+
+        console.log(
+            "Amount:",
+            mpesaAmount || amount
+        );
+
+        console.log(
+            "Receipt:",
+            mpesaReceipt
+        );
+
+        console.log(
+            "Checkout:",
+            checkoutId
+        );
+
+        console.log(
+            "================================"
+        );
+
+
+        return res.json({
+            ResultCode: 0,
+            ResultDesc: "Accepted"
+        });
+
+
     }
 
-    return res.json({
+    catch (error) {
 
-        ResultCode: 0,
-        ResultDesc: "Accepted"
+        console.log(
+            "================================"
+        );
 
-    });
+        console.log(
+            "CALLBACK FAILED"
+        );
 
-}
+        console.log(
+            "================================"
+        );
+
+        console.error(error);
+
+
+        /*
+        ==================================================
+        UNLOCK TRANSACTION
+        ==================================================
+        */
+
+        try {
+
+            if (checkoutId) {
+
+                await db
+                    .ref("transactions")
+                    .child(checkoutId)
+                    .update({
+
+                        processing:
+                            false,
+
+                        processingStartedAt:
+                            null,
+
+                        lastError:
+                            error.message,
+
+                        lastErrorAt:
+                            Date.now()
+
+                    });
+
+            }
+
+        }
+
+        catch (unlockError) {
+
+            console.error(
+                "Failed to unlock transaction:",
+                unlockError
+            );
+
+        }
+
+
+        /*
+        ==================================================
+        ACKNOWLEDGE SAFARICOM
+        ==================================================
+        */
+
+        return res.json({
+            ResultCode: 0,
+            ResultDesc: "Accepted"
+        });
+
+    }
 
 });
 
-/*
-==========================================
-B2C RESULT CALLBACK
-==========================================
-*/
+//======================================================
+// M-PESA B2C RESULT CALLBACK
+//======================================================
 
 app.post("/mpesa/b2c/result", async (req, res) => {
 
-    console.log("================================");
-    console.log("B2C RESULT CALLBACK");
-    console.log("================================");
+    console.log(
+        "================================"
+    );
 
-    console.log(JSON.stringify(req.body, null, 2));
+    console.log(
+        "B2C RESULT CALLBACK"
+    );
+
+    console.log(
+        "================================"
+    );
+
+
+    console.log(
+        JSON.stringify(
+            req.body,
+            null,
+            2
+        )
+    );
+
 
     try {
 
-        const result = req.body.Result || {};
+        const result =
+            req.body?.Result || {};
 
-        const localOriginatorConversationId =
-    result.OriginatorConversationID;
 
-if (!localOriginatorConversationId) {
+        /*
+        ==================================================
+        ORIGINATOR CONVERSATION ID
+        ==================================================
+        */
 
-    return res.json({
-        ResultCode: 0,
-        ResultDesc: "Accepted"
-    });
+        const originatorConversationId =
+            result.OriginatorConversationID;
 
-}
 
-/*
-==================================
-LOOKUP PAYMENT
-==================================
-*/
+        if (!originatorConversationId) {
 
-const originatorConversationId =
-    result.OriginatorConversationID;
+            console.log(
+                "B2C callback missing OriginatorConversationID."
+            );
 
-const paymentQuery =
-    await db
-        .ref("payments")
-        .orderByChild("originatorConversationId")
-        .equalTo(originatorConversationId)
-        .once("value");
 
-if (!paymentQuery.exists()) {
+            return res.json({
 
-    console.log(
-    "Payment not found:",
-    originatorConversationId
-);
+                ResultCode: 0,
 
-    return res.json({
-        ResultCode: 0,
-        ResultDesc: "Accepted"
-    });
+                ResultDesc:
+                    "Accepted"
 
-}
+            });
 
-const paymentKey =
-    Object.keys(paymentQuery.val())[0];
+        }
 
-const paymentRef =
-    db.ref("payments").child(paymentKey);
 
-const payment =
-    paymentQuery.val()[paymentKey];
+        /*
+        ==================================================
+        FIND PAYMENT
+        ==================================================
+        */
 
-        if (result.ResultCode == 0) {
+        const paymentQuery =
+            await db
+                .ref("payments")
+                .orderByChild(
+                    "originatorConversationId"
+                )
+                .equalTo(
+                    originatorConversationId
+                )
+                .once("value");
 
-            console.log("B2C SUCCESS");
+
+        if (!paymentQuery.exists()) {
+
+            console.log(
+                "B2C payment not found:",
+                originatorConversationId
+            );
+
+
+            return res.json({
+
+                ResultCode: 0,
+
+                ResultDesc:
+                    "Accepted"
+
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        GET PAYMENT
+        ==================================================
+        */
+
+        const paymentData =
+            paymentQuery.val();
+
+
+        const paymentKey =
+            Object.keys(paymentData)[0];
+
+
+        const paymentRef =
+            db
+                .ref("payments")
+                .child(paymentKey);
+
+
+        const payment =
+            paymentData[paymentKey];
+
+
+        /*
+        ==================================================
+        PREVENT DUPLICATE PROCESSING
+        ==================================================
+        */
+
+        if (
+            payment.status ===
+            PaymentStatus.SUCCESS
+        ) {
+
+            console.log(
+                "B2C payment already completed:",
+                originatorConversationId
+            );
+
+
+            return res.json({
+
+                ResultCode: 0,
+
+                ResultDesc:
+                    "Accepted"
+
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        B2C SUCCESS
+        ==================================================
+        */
+
+        if (
+            Number(result.ResultCode) === 0
+        ) {
+
+            console.log(
+                "B2C SUCCESS"
+            );
+
 
             await paymentRef.update({
 
-                status: PaymentStatus.SUCCESS,
+                status:
+                    PaymentStatus.SUCCESS,
 
                 receipt:
                     result.TransactionID || "",
@@ -943,19 +1764,40 @@ const payment =
 
             });
 
-            await WithdrawalManager.markAsPaid(
 
-                payment.withdrawalId,
+            /*
+            ----------------------------------------------
+            MARK WITHDRAWAL AS PAID
+            ----------------------------------------------
+            */
 
-                result.TransactionID || ""
+            if (payment.withdrawalId) {
 
-            );
+                await WithdrawalManager.markAsPaid(
+
+                    payment.withdrawalId,
+
+                    result.TransactionID || ""
+
+                );
+
+            }
 
         }
 
+
+        /*
+        ==================================================
+        B2C FAILURE
+        ==================================================
+        */
+
         else {
 
-            console.log("B2C FAILED");
+            console.log(
+                "B2C FAILED"
+            );
+
 
             await paymentRef.update({
 
@@ -963,7 +1805,10 @@ const payment =
                     PaymentStatus.FAILED,
 
                 error:
-                    result.ResultDesc,
+                    result.ResultDesc || "B2C payment failed",
+
+                resultCode:
+                    result.ResultCode,
 
                 completedAt:
                     Date.now(),
@@ -973,35 +1818,64 @@ const payment =
 
             });
 
-            await WithdrawalManager.markPaymentFailed(
 
-                payment.withdrawalId,
+            /*
+            ----------------------------------------------
+            MARK WITHDRAWAL PAYMENT FAILED
+            ----------------------------------------------
+            */
 
-                result.ResultDesc
+            if (payment.withdrawalId) {
 
-            );
+                await WithdrawalManager.markPaymentFailed(
+
+                    payment.withdrawalId,
+
+                    result.ResultDesc ||
+                        "B2C payment failed"
+
+                );
+
+            }
 
         }
 
+
+        /*
+        ==================================================
+        ACKNOWLEDGE SAFARICOM
+        ==================================================
+        */
+
         return res.json({
 
-            ResultCode:0,
+            ResultCode: 0,
 
-            ResultDesc:"Accepted"
+            ResultDesc:
+                "Accepted"
 
         });
 
-    }
 
-    catch(e){
+    } catch (error) {
 
-        console.error(e);
+        console.error(
+            "B2C callback processing failed:",
+            error
+        );
+
+
+        /*
+        IMPORTANT:
+        Always acknowledge Safaricom.
+        */
 
         return res.json({
 
-            ResultCode:0,
+            ResultCode: 0,
 
-            ResultDesc:"Accepted"
+            ResultDesc:
+                "Accepted"
 
         });
 
@@ -1143,6 +2017,69 @@ app.post("/mpesa/b2c/timeout", async (req, res) => {
             ResultCode: 0,
 
             ResultDesc: "Accepted"
+
+        });
+
+    }
+
+});
+
+
+//======================================================
+// ENTITLEMENT CHECK
+//======================================================
+
+app.get("/entitlement/:childId", async (req, res) => {
+
+    try {
+
+        const { childId } = req.params;
+
+        if (!childId) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message: "childId is required."
+
+            });
+
+        }
+
+        const entitlement =
+            await EntitlementManager
+                .getEntitlement(childId);
+
+        return res.json({
+
+            success: true,
+
+            childId,
+
+            ...entitlement
+
+        });
+
+    }
+
+    catch (error) {
+
+        console.error(
+            "ENTITLEMENT ERROR:",
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            premium: false,
+
+            status: "ERROR",
+
+            message:
+                error.message
 
         });
 

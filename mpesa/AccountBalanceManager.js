@@ -23,7 +23,7 @@ class AccountBalanceManager {
         return response.data.access_token;
     }
 
-    async getBalance() {
+    async checkBalance()  {
 
         const token = await this.getAccessToken();
 

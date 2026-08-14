@@ -137,7 +137,7 @@ if (formattedPhone.startsWith("+254")) {
 
 
             CallBackURL:
-                "https://unadaptively-papyraceous-jaxton.ngrok-free.dev/mpesa/callback",
+                 `${process.env.CALLBACK_BASE_URL}/mpesa/callback`,
 
 
 

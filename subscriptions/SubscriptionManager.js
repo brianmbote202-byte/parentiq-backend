@@ -388,20 +388,51 @@ return {
      */
     async isActive(childId) {
 
-        const subscription =
-            await this.getSubscription(childId);
+    const subscription =
+        await this.getSubscription(childId);
 
-        if (!subscription) {
-            return false;
-        }
-
-        return (
-            subscription.active === true &&
-            subscription.status === "ACTIVE" &&
-            subscription.expiryDate > Date.now()
-        );
-
+    if (!subscription) {
+        return false;
     }
+
+    return (
+        subscription.active === true &&
+        subscription.premium === true &&
+        subscription.status === "ACTIVE" &&
+        Number(subscription.expiryDate || 0) > Date.now()
+    );
+
+}
+
+/**
+ * Check whether a child currently has Premium access.
+ *
+ * Premium access can come from:
+ *
+ * 1. Individual Premium subscription
+ * OR
+ * 2. Active Family subscription covering this child
+ */
+/**
+ * Check whether a child currently has Premium access.
+ *
+ * EntitlementManager is the single source of truth.
+ *
+ * Premium can come from:
+ * 1. Individual Premium subscription
+ * 2. Active Family subscription
+ */
+async hasPremiumAccess(childId) {
+
+    if (!childId) {
+        return false;
+    }
+
+    const entitlement =
+        await EntitlementManager.getEntitlement(childId);
+
+    return entitlement.premium === true;
+}
 
     /**
      * Check if subscription has expired.
@@ -443,6 +474,365 @@ return {
         );
 
     }
+
+    /**
+ * Activate or renew a Family subscription
+ * at the parent level.
+ *
+ * IMPORTANT:
+ * The child's subscription is NOT removed.
+ *
+ * The child subscription remains the source
+ * for agent/customer/payment records.
+ *
+ * The parent familySubscription is the
+ * source of truth for Family entitlement.
+ */
+async activateFamily(parentId, childId, planId = "family") {
+
+    /*
+    --------------------------------------
+    Validate Parent
+    --------------------------------------
+    */
+
+    if (!parentId) {
+        throw new Error("Parent ID is required.");
+    }
+
+    /*
+    --------------------------------------
+    Validate Child
+    --------------------------------------
+    */
+
+    const childExists =
+        await ChildManager.childExists(childId);
+
+    if (!childExists) {
+        throw new Error("Child not found.");
+    }
+
+    /*
+    --------------------------------------
+    Validate Plan
+    --------------------------------------
+    */
+
+    const planExists =
+        await PlanManager.planExists(planId);
+
+    if (!planExists) {
+        throw new Error("Subscription plan does not exist.");
+    }
+
+    const active =
+        await PlanManager.isPlanActive(planId);
+
+    if (!active) {
+        throw new Error("Subscription plan is inactive.");
+    }
+
+    const plan =
+        await PlanManager.getPlan(planId);
+
+    /*
+    --------------------------------------
+    Make sure this is Family
+    --------------------------------------
+    */
+
+    if (plan.id !== "family") {
+        throw new Error(
+            "activateFamily can only be used with the Family plan."
+        );
+    }
+
+    /*
+    --------------------------------------
+    Parent Family Subscription
+    --------------------------------------
+    */
+
+    const familyRef =
+        db
+            .ref("parents")
+            .child(parentId)
+            .child("familySubscription");
+
+    const snapshot =
+        await familyRef.get();
+
+    const currentFamily =
+        snapshot.exists()
+            ? snapshot.val()
+            : null;
+
+    const now = Date.now();
+
+    /*
+    --------------------------------------
+    PAYMENT / RENEWAL COUNTERS
+    --------------------------------------
+    */
+
+    const paymentsCount =
+        Number(
+            currentFamily?.paymentsCount || 0
+        ) + 1;
+
+    const lifetimeValue =
+        Number(
+            currentFamily?.lifetimeValue || 0
+        ) + Number(plan.price);
+
+    const totalDaysPurchased =
+        Number(
+            currentFamily?.totalDaysPurchased || 0
+        ) + Number(plan.durationDays);
+
+    const firstSubscribedAt =
+        currentFamily?.firstSubscribedAt || now;
+
+    /*
+    --------------------------------------
+    FAMILY DURATION
+    --------------------------------------
+    */
+
+    const duration =
+        Number(plan.durationDays) *
+        24 *
+        60 *
+        60 *
+        1000;
+
+    let startDate = now;
+
+    let expiryDate =
+        now + duration;
+
+    /*
+    ======================================
+    ACTIVE FAMILY SUBSCRIPTION
+    ======================================
+    
+    If the Family subscription is still
+    active, extend it instead of starting
+    a completely new period.
+    */
+
+    if (
+        currentFamily &&
+        currentFamily.status === "ACTIVE" &&
+        currentFamily.active === true &&
+        Number(currentFamily.expiryDate || 0) > now
+    ) {
+
+        startDate =
+            currentFamily.startDate || now;
+
+        expiryDate =
+            Number(currentFamily.expiryDate) +
+            duration;
+
+        console.log(
+            "Renewing existing Family subscription"
+        );
+
+    }
+
+    else {
+
+        console.log(
+            "Creating new Family subscription"
+        );
+
+    }
+
+    /*
+    --------------------------------------
+    COVERED CHILDREN
+    --------------------------------------
+    
+    IMPORTANT:
+    
+    Preserve the existing coveredChildren
+    when renewing Family.
+    */
+
+    const coveredChildren =
+        currentFamily?.coveredChildren || {};
+
+    /*
+    --------------------------------------
+    FAMILY SUBSCRIPTION
+    --------------------------------------
+    */
+
+    const familySubscription = {
+
+        active: true,
+
+        premium: true,
+
+        status: "ACTIVE",
+
+        planId: plan.id,
+
+        planName: plan.name,
+
+        planPrice: plan.price,
+
+        durationDays: plan.durationDays,
+
+        maxChildren:
+            Number(
+                plan.maxChildren || 3
+            ),
+
+        createdAt:
+            currentFamily?.createdAt || now,
+
+        firstSubscribedAt,
+
+        startDate,
+
+        expiryDate,
+
+        paymentsCount,
+
+        totalDaysPurchased,
+
+        lifetimeValue,
+
+        currentPlanPrice:
+            Number(plan.price),
+
+        lastRenewedAt: now,
+
+        updatedAt: now,
+
+        coveredChildren
+
+    };
+
+    /*
+    --------------------------------------
+    SAVE PARENT FAMILY SUBSCRIPTION
+    --------------------------------------
+    */
+
+    await familyRef.set(
+        familySubscription
+    );
+
+    /*
+    --------------------------------------
+    MAKE SURE THE PAYING CHILD
+    IS COVERED
+    --------------------------------------
+    
+    The first child that paid for Family
+    should automatically occupy one slot.
+    */
+
+    if (
+        !coveredChildren[childId]
+    ) {
+
+        await familyRef
+            .child("coveredChildren")
+            .child(childId)
+            .set(true);
+
+        familySubscription.coveredChildren[childId] =
+            true;
+
+    }
+
+    /*
+    --------------------------------------
+    RETURN UPDATED COUNTS
+    --------------------------------------
+    */
+
+    const usedChildren =
+        Object.keys(
+            familySubscription.coveredChildren || {}
+        ).filter(
+            id =>
+                familySubscription
+                    .coveredChildren[id] === true
+        ).length;
+
+    const maxChildren =
+        Number(
+            familySubscription.maxChildren || 3
+        );
+
+    const remainingChildren =
+        Math.max(
+            0,
+            maxChildren - usedChildren
+        );
+
+    console.log(
+        "================================"
+    );
+
+    console.log(
+        "FAMILY SUBSCRIPTION ACTIVATED"
+    );
+
+    console.log(
+        "Parent:",
+        parentId
+    );
+
+    console.log(
+        "Child:",
+        childId
+    );
+
+    console.log(
+        "Plan:",
+        plan.id
+    );
+
+    console.log(
+        "Used Children:",
+        usedChildren
+    );
+
+    console.log(
+        "Remaining Children:",
+        remainingChildren
+    );
+
+    console.log(
+        "Expiry:",
+        expiryDate
+    );
+
+    console.log(
+        "================================"
+    );
+
+    return {
+
+        ...familySubscription,
+
+        coveredChildren:
+            familySubscription.coveredChildren,
+
+        usedChildren,
+
+        remainingChildren
+
+    };
+
+}
 
 }
 
