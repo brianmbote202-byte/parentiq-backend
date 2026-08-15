@@ -445,193 +445,125 @@ class EntitlementManager {
     MAIN ENTITLEMENT CHECK
     ==================================================
     */
+async getEntitlement(childId) {
 
-    async getEntitlement(childId) {
+    /*
+    ==================================================
+    VALIDATE CHILD ID
+    ==================================================
+    */
 
-        /*
-        ----------------------------------------------
-        VALIDATE CHILD ID
-        ----------------------------------------------
-        */
+    if (!childId) {
 
-        if (!childId) {
+        return {
 
-            return {
+            premium: false,
 
-                premium: false,
+            status: "ERROR",
 
-                status: "ERROR",
+            reason: "CHILD_ID_REQUIRED"
 
-                reason: "CHILD_ID_REQUIRED"
+        };
 
-            };
-
-        }
-
-
-        /*
-        ----------------------------------------------
-        GET CHILD
-        ----------------------------------------------
-        */
-
-        const child =
-            await this.getChild(childId);
+    }
 
 
-        if (!child) {
+    /*
+    ==================================================
+    GET CHILD
+    ==================================================
+    */
 
-            return {
-
-                premium: false,
-
-                status: "NOT_FOUND",
-
-                reason: "CHILD_NOT_FOUND"
-
-            };
-
-        }
+    const child =
+        await this.getChild(childId);
 
 
-        /*
-        ----------------------------------------------
-        GET PARENT ID
-        ----------------------------------------------
-        */
+    if (!child) {
 
-        const parentId =
-            child.parentId;
+        return {
 
+            premium: false,
 
-        /*
-        ==================================================
-        FAMILY SUBSCRIPTION CHECK
-        ==================================================
-        
-        Family entitlement is parent-based.
-        */
+            status: "NOT_FOUND",
 
-        if (parentId) {
+            reason: "CHILD_NOT_FOUND"
 
-            const familySubscription =
-                await this.getFamilySubscription(
-                    parentId
-                );
+        };
+
+    }
 
 
-            if (familySubscription) {
+    /*
+    ==================================================
+    GET PARENT ID
+    ==================================================
+    */
 
-                const familyEntitlement =
-                    await this.checkFamilyEntitlement(
-                        childId,
-                        parentId,
-                        familySubscription
-                    );
-
-
-                /*
-                ------------------------------------------
-                FAMILY SUBSCRIPTION EXISTS
-                ------------------------------------------
-                
-                If Family has an available slot,
-                the child becomes covered.
-
-                If Family is depleted,
-                return NOT PREMIUM.
-
-                We do NOT fall through to another
-                subscription for a Family-limit case.
-                */
-
-                if (familyEntitlement) {
-
-                    return {
-
-                        ...familyEntitlement,
-
-                        childId,
-
-                        parentId
-
-                    };
-
-                }
-
-            }
-
-        }
+    const parentId =
+        child.parentId || null;
 
 
-        /*
-        ==================================================
-        INDIVIDUAL CHILD SUBSCRIPTION
-        ==================================================
-        
-        This keeps your existing Premium plan working.
-        */
+    /*
+    ==================================================
+    CURRENT TIME
+    ==================================================
+    */
 
-        const subscriptionRef =
-            db
-                .ref("children")
-                .child(childId)
-                .child("subscription");
+    const now =
+        Date.now();
 
 
-        const snapshot =
-            await subscriptionRef.get();
+    /*
+    ==================================================
+    FIRST: CHECK INDIVIDUAL CHILD SUBSCRIPTION
+    ==================================================
+
+    IMPORTANT:
+
+    A child may have its own Premium subscription even
+    when the parent's Family allocation is already full.
+
+    Therefore we MUST check the child's own subscription
+    before rejecting because of FAMILY_CHILD_LIMIT_REACHED.
+    */
+
+    const subscriptionRef =
+        db
+            .ref("children")
+            .child(childId)
+            .child("subscription");
 
 
-        /*
-        ----------------------------------------------
-        NO CHILD SUBSCRIPTION
-        ----------------------------------------------
-        */
+    const snapshot =
+        await subscriptionRef.get();
 
-        if (!snapshot.exists()) {
 
-            return {
-
-                premium: false,
-
-                status: "NONE",
-
-                reason: "NO_SUBSCRIPTION",
-
-                childId,
-
-                parentId: parentId || null
-
-            };
-
-        }
-
+    if (snapshot.exists()) {
 
         const subscription =
             snapshot.val();
 
 
-        const now =
-            Date.now();
+        const expiryDate =
+            Number(
+                subscription.expiryDate || 0
+            );
 
 
         /*
-        ==================================================
-        VALID INDIVIDUAL PREMIUM
-        ==================================================
+        ----------------------------------------------
+        INDIVIDUAL PREMIUM IS ACTIVE
+        ----------------------------------------------
         */
 
-        const premium =
+        const individualPremium =
             subscription.premium === true &&
             subscription.active === true &&
             subscription.status === "ACTIVE" &&
-            Number(
-                subscription.expiryDate || 0
-            ) > now;
+            expiryDate > now;
 
 
-        if (premium) {
+        if (individualPremium) {
 
             return {
 
@@ -639,10 +571,7 @@ class EntitlementManager {
 
                 status: "ACTIVE",
 
-                expiryDate:
-                    Number(
-                        subscription.expiryDate
-                    ),
+                expiryDate,
 
                 planId:
                     subscription.planId ||
@@ -654,8 +583,7 @@ class EntitlementManager {
 
                 childId,
 
-                parentId:
-                    parentId || null
+                parentId
 
             };
 
@@ -663,18 +591,13 @@ class EntitlementManager {
 
 
         /*
-        ==================================================
-        EXPIRED INDIVIDUAL SUBSCRIPTION
-        ==================================================
+        ----------------------------------------------
+        INDIVIDUAL SUBSCRIPTION EXPIRED
+        ----------------------------------------------
         */
 
-        const expiryDate =
-            Number(
-                subscription.expiryDate || 0
-            );
-
-
         if (
+            expiryDate > 0 &&
             expiryDate <= now
         ) {
 
@@ -690,71 +613,179 @@ class EntitlementManager {
 
             });
 
+        }
 
-            return {
+    }
 
-                premium: false,
 
-                status: "EXPIRED",
+    /*
+    ==================================================
+    SECOND: CHECK FAMILY SUBSCRIPTION
+    ==================================================
 
-                expiryDate,
+    Family entitlement is parent-based.
 
-                planId:
-                    subscription.planId ||
-                    null,
+    We only reach this section if the child does NOT
+    already have its own active individual subscription.
+    */
 
-                planName:
-                    subscription.planName ||
-                    null,
+    if (parentId) {
 
-                reason:
-                    "SUBSCRIPTION_EXPIRED",
+        const familySubscription =
+            await this.getFamilySubscription(
+                parentId
+            );
 
-                childId,
 
-                parentId:
-                    parentId || null
+        if (familySubscription) {
 
-            };
+            const familyEntitlement =
+                await this.checkFamilyEntitlement(
+                    childId,
+                    parentId,
+                    familySubscription
+                );
+
+
+            /*
+            ------------------------------------------
+            FAMILY CHILD IS COVERED
+            ------------------------------------------
+            */
+
+            if (familyEntitlement) {
+
+                return {
+
+                    ...familyEntitlement,
+
+                    childId,
+
+                    parentId
+
+                };
+
+            }
 
         }
 
+    }
 
-        /*
-        ==================================================
-        NOT ACTIVE
-        ==================================================
-        */
+
+    /*
+    ==================================================
+    THIRD: NO ACTIVE SUBSCRIPTION
+    ==================================================
+    */
+
+    const currentSnapshot =
+        await subscriptionRef.get();
+
+
+    if (!currentSnapshot.exists()) {
 
         return {
 
             premium: false,
 
-            status:
-                subscription.status ||
-                "INACTIVE",
+            status: "NONE",
 
-            expiryDate,
-
-            planId:
-                subscription.planId ||
-                null,
-
-            planName:
-                subscription.planName ||
-                null,
-
-            reason:
-                "SUBSCRIPTION_NOT_ACTIVE",
+            reason: "NO_SUBSCRIPTION",
 
             childId,
 
-            parentId:
-                parentId || null
+            parentId
 
         };
 
     }
+
+
+    const currentSubscription =
+        currentSnapshot.val();
+
+
+    const currentExpiryDate =
+        Number(
+            currentSubscription.expiryDate || 0
+        );
+
+
+    /*
+    ==================================================
+    EXPIRED
+    ==================================================
+    */
+
+    if (
+        currentExpiryDate > 0 &&
+        currentExpiryDate <= now
+    ) {
+
+        return {
+
+            premium: false,
+
+            status: "EXPIRED",
+
+            expiryDate:
+                currentExpiryDate,
+
+            planId:
+                currentSubscription.planId ||
+                null,
+
+            planName:
+                currentSubscription.planName ||
+                null,
+
+            reason:
+                "SUBSCRIPTION_EXPIRED",
+
+            childId,
+
+            parentId
+
+        };
+
+    }
+
+
+    /*
+    ==================================================
+    FAMILY LIMIT / OTHER INACTIVE STATE
+    ==================================================
+    */
+
+    return {
+
+        premium: false,
+
+        status:
+            currentSubscription.status ||
+            "INACTIVE",
+
+        expiryDate:
+            currentExpiryDate,
+
+        planId:
+            currentSubscription.planId ||
+            null,
+
+        planName:
+            currentSubscription.planName ||
+            null,
+
+        reason:
+            "SUBSCRIPTION_NOT_ACTIVE",
+
+        childId,
+
+        parentId
+
+    };
+
+}
 
 
     /*
