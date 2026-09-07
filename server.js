@@ -25,7 +25,11 @@ const {
     classifyPendingApp,
     correctAppCategory,
     processPendingApps
-} = require("./appClassification/AppCategoryProcessor");
+} = require("./appClassification/AppCategoryProcessor"); 
+
+const {
+    startAppClassificationWorker
+} = require("./appClassification/AppClassificationWorker");
 
 
 
@@ -3903,6 +3907,8 @@ app.get(
 const server = app.listen(PORT, () => {
 
     console.log(`Server running on port ${PORT}`);
+
+    startAppClassificationWorker();
 
 });
 
