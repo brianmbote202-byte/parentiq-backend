@@ -15,6 +15,21 @@ const cors = require("cors");
 const DashboardManager =
 require("./dashboard/DashboardManager");
 
+//======APP CLASSIFICATION=====
+const { classifyApp } = require("./appClassification/AppClassifier");
+
+
+
+
+const {
+    classifyPendingApp,
+    correctAppCategory,
+    processPendingApps
+} = require("./appClassification/AppCategoryProcessor");
+
+
+
+
 const ActivityManager =
     require("./activity/ActivityManager");
 
@@ -128,6 +143,191 @@ initializeDatabase()
 
 app.use(cors());
 app.use(express.json());
+
+
+app.post("/app-classification/classify", async (req, res) => {
+    try {
+        const { appName, packageName } = req.body;
+
+        if (!appName || !packageName) {
+            return res.status(400).json({
+                success: false,
+                error: "appName and packageName are required"
+            });
+        }
+
+        const category = await classifyApp(
+            appName,
+            packageName
+        );
+
+        return res.json({
+            success: true,
+            appName,
+            packageName,
+            category
+        });
+
+    } catch (error) {
+        console.error(
+            "❌ App classification endpoint failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "App classification failed"
+        });
+    }
+});
+
+//=============UPDATE PENDING APP CATEGOTY=========
+app.post("/app-classification/classify-pending", async (req, res) => {
+    try {
+        const { packageKey } = req.body;
+
+        if (!packageKey) {
+            return res.status(400).json({
+                success: false,
+                error: "packageKey is required"
+            });
+        }
+
+        const result = await classifyPendingApp(packageKey);
+
+        return res.json({
+            success: true,
+            ...result
+        });
+
+    } catch (error) {
+        console.error(
+            "❌ Pending app classification failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "Pending app classification failed"
+        });
+    }
+});
+
+//=========process pending categories in batches==========
+app.post("/app-classification/process-pending", async (req, res) => {
+    try {
+        const result = await processPendingApps(5);
+
+        return res.json({
+            success: true,
+            ...result
+        });
+
+    } catch (error) {
+        console.error(
+            "❌ Pending apps processing failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "Pending apps processing failed"
+        });
+    }
+});
+
+//==================PENDING APPS INSPECTION=========
+
+app.get("/app-classification/pending", async (req, res) => {
+    try {
+        const snapshot = await db
+            .ref("app_categories")
+            .once("value");
+
+        if (!snapshot.exists()) {
+            return res.json({
+                success: true,
+                count: 0,
+                apps: []
+            });
+        }
+
+        const apps = snapshot.val() || {};
+
+        const pendingApps = Object.entries(apps)
+            .filter(([_, appData]) =>
+                appData &&
+                appData.category === "pending"
+            )
+            .map(([packageKey, appData]) => ({
+                packageKey,
+                appName: appData.appName || "",
+                packageName: appData.packageName || ""
+            }));
+
+        return res.json({
+            success: true,
+            count: pendingApps.length,
+            apps: pendingApps
+        });
+
+    } catch (error) {
+        console.error(
+            "❌ Failed to inspect pending apps:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "Failed to inspect pending apps"
+        });
+    }
+});
+
+//============app classification correction========
+app.post("/app-classification/correct", async (req, res) => {
+    try {
+        const { packageKey, category } = req.body;
+
+        if (!packageKey || !category) {
+            return res.status(400).json({
+                success: false,
+                error: "packageKey and category are required"
+            });
+        }
+
+        const result = await correctAppCategory(
+            packageKey,
+            category
+        );
+
+        return res.json({
+            success: true,
+            ...result
+        });
+
+    } catch (error) {
+        console.error(
+            "❌ App category correction failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "App category correction failed"
+        });
+    }
+});
+
+
+
+
+
+
+
+
+
+
 app.use("/apk", express.static(path.join(__dirname, "apk")));
 app.use("/customers", customerRoutes);
 app.use("/agents", agentRoutes);
