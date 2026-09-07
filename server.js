@@ -149,6 +149,44 @@ app.use(cors());
 app.use(express.json());
 
 
+
+//=================TEST DOMAINS TEMPORARILY==========
+const { classifyDomain } = require("./appClassification/DomainClassifier");
+
+app.post("/domain-classification/classify", async (req, res) => {
+    try {
+        const { domain } = req.body;
+
+        if (!domain) {
+            return res.status(400).json({
+                success: false,
+                error: "domain is required"
+            });
+        }
+
+        const category = await classifyDomain(domain);
+
+        return res.json({
+            success: true,
+            domain,
+            category
+        });
+
+    } catch (error) {
+
+        console.error(
+            "❌ Domain classification endpoint failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "Domain classification failed"
+        });
+    }
+});
+
+
 app.post("/app-classification/classify", async (req, res) => {
     try {
         const { appName, packageName } = req.body;
