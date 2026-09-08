@@ -164,12 +164,12 @@ app.post("/domain-classification/classify", async (req, res) => {
             });
         }
 
-        const category = await classifyDomain(domain);
+        const result = await classifyDomain(domain);
 
         return res.json({
             success: true,
             domain,
-            category
+            ...result
         });
 
     } catch (error) {

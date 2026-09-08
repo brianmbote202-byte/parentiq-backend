@@ -1,26 +1,9 @@
+
 const OpenAI = require("openai");
 
 const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
 });
-
-const ALLOWED_DOMAIN_CATEGORIES = [
-    "social_media",
-    "messaging",
-    "gaming",
-    "search_engine",
-    "streaming",
-    "shopping",
-    "finance",
-    "betting_gambling",
-    "sexual_content",
-    "education",
-    "news",
-    "productivity",
-    "health",
-    "technology",
-    "other"
-];
 
 async function classifyDomain(domain) {
 
@@ -43,91 +26,113 @@ async function classifyDomain(domain) {
         model: "gpt-5.6-luna",
 
         input: [
+
             {
                 role: "system",
 
                 content: `
 You are a website domain classification service for a parental-control application.
 
-Classify the domain into exactly ONE of these categories:
+Your task is to identify the PRIMARY ACTIVITY and PRIMARY PURPOSE of the
+specific website represented by the domain.
 
-${ALLOWED_DOMAIN_CATEGORIES.join(", ")}
+The classification is NOT restricted to a predefined category list.
 
-Rules:
-
-- Classify the domain based primarily on the website's known purpose.
-- Use the domain name as a signal.
-- Do not invent categories.
-- Return exactly one category from the allowed list.
-
-CATEGORY RULES:
-
-- Social networking and social-media platforms
-  → social_media
-
-- Chat, messaging and communication platforms
-  → messaging
-
-- Online games, gaming platforms and game communities
-  → gaming
-
-- Search engines and general web-search services
-  → search_engine
-
-- Video, music, movie and media streaming platforms
-  → streaming
-
-- Online stores, marketplaces and ecommerce platforms
-  → shopping
-
-- Banks, payment services, investment platforms,
-  financial services and cryptocurrency exchanges
-  → finance
-
-- Sports betting, casinos, gambling and betting platforms
-  → betting_gambling
-
-- Pornographic, sexually explicit or adult-content websites
-  → sexual_content
-
-- Schools, universities, educational platforms,
-  learning resources and academic services
-  → education
-
-- Newspapers, journalism, magazines and news publishers
-  → news
-
-- Office tools, work-management tools,
-  business productivity and collaboration platforms
-  → productivity
-
-- Medical, healthcare, fitness and health-information services
-  → health
-
-- Technology companies, developer platforms,
-  software documentation and technical resources
-  → technology
-
-- Domains whose purpose cannot be determined reliably
-  → other
+You may create a new category whenever necessary.
 
 IMPORTANT:
 
-Do not classify a domain simply because its company owns
-another type of service.
+First determine what the website fundamentally exists to provide to users.
 
-Classify the actual purpose of the domain being provided.
+Then generate a concise category that represents that primary activity.
 
-For example:
-- youtube.com → streaming
-- instagram.com → social_media
-- whatsapp.com → messaging
-- google.com → search_engine
-- amazon.com → shopping
-- bet365.com → betting_gambling
+The category must NOT be based simply on:
+- how the website makes money
+- whether the website accepts payments
+- whether the website is a marketplace
+- whether users can buy something
+- whether the company is a technology company
+- secondary features offered by the website
+
+When a website facilitates transactions for a particular service, classify
+the underlying service rather than the transaction mechanism.
+
+Examples:
+
+booking.com
+primaryPurpose → travel_booking
+category → travel
+
+airbnb.com
+primaryPurpose → accommodation_booking
+category → travel
+
+amazon.com
+primaryPurpose → ecommerce
+category → shopping
+
+indeed.com
+primaryPurpose → job_search
+category → jobs
+
+upwork.com
+primaryPurpose → freelance_work
+category → freelancing
+
+wikipedia.org
+primaryPurpose → online_reference
+category → reference
+
+github.com
+primaryPurpose → software_development
+category → technology
+
+youtube.com
+primaryPurpose → video_streaming
+category → streaming
+
+instagram.com
+primaryPurpose → social_networking
+category → social_media
+
+whatsapp.com
+primaryPurpose → messaging
+category → messaging
+
+google.com
+primaryPurpose → web_search
+category → search_engine
+
+bet365.com
+primaryPurpose → sports_betting_and_gambling
+category → betting_gambling
+
+CATEGORY RULES:
+
+- Category must describe the primary user activity.
+- Category must be concise.
+- Category must use lowercase snake_case.
+- Category must contain no spaces.
+- Category must contain exactly one category.
+- Do not automatically use "other" when a meaningful category can be
+  determined.
+- Do not use a category based only on the company's industry.
+- Do not use "shopping" merely because transactions occur on the website.
+- Do not use "finance" merely because the website processes payments.
+- Do not use "technology" merely because the website is operated by a
+  technology company.
+
+PRIMARY PURPOSE RULES:
+
+- primaryPurpose must describe the specific service or activity provided
+  by the domain.
+- primaryPurpose must be concise.
+- primaryPurpose must use lowercase snake_case.
+- primaryPurpose must contain no spaces.
+- primaryPurpose must contain exactly one purpose.
 
 Return JSON only.
-                `
+`
             },
 
             {
@@ -140,7 +145,9 @@ Return JSON only.
         ],
 
         text: {
+
             format: {
+
                 type: "json_schema",
 
                 name: "domain_classification",
@@ -148,17 +155,24 @@ Return JSON only.
                 strict: true,
 
                 schema: {
+
                     type: "object",
 
                     properties: {
+
                         category: {
-                            type: "string",
-                            enum: ALLOWED_DOMAIN_CATEGORIES
+                            type: "string"
+                        },
+
+                        primaryPurpose: {
+                            type: "string"
                         }
+
                     },
 
                     required: [
-                        "category"
+                        "category",
+                        "primaryPurpose"
                     ],
 
                     additionalProperties: false
@@ -170,24 +184,39 @@ Return JSON only.
     const result =
         JSON.parse(response.output_text);
 
-    if (
-        !ALLOWED_DOMAIN_CATEGORIES.includes(
-            result.category
-        )
-    ) {
+    const category =
+        result.category
+            ?.trim()
+            .toLowerCase();
+
+    const primaryPurpose =
+        result.primaryPurpose
+            ?.trim()
+            .toLowerCase();
+
+    if (!category) {
         throw new Error(
-            `Invalid domain classification returned: ${result.category}`
+            "Invalid domain classification returned: empty category"
+        );
+    }
+
+    if (!primaryPurpose) {
+        throw new Error(
+            "Invalid domain classification returned: empty primaryPurpose"
         );
     }
 
     console.log(
-        `🌐 DOMAIN CLASSIFIED: ${normalizedDomain} → ${result.category}`
+        `🌐 DOMAIN CLASSIFIED: ${normalizedDomain} → ${category} (${primaryPurpose})`
     );
 
-    return result.category;
+    return {
+        category,
+        primaryPurpose
+    };
 }
 
 module.exports = {
-    classifyDomain,
-    ALLOWED_DOMAIN_CATEGORIES
+    classifyDomain
 };
+
