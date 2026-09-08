@@ -149,6 +149,47 @@ app.use(cors());
 app.use(express.json());
 
 
+//========temporary tester=========
+app.post("/domain-classification/process", async (req, res) => {
+
+    try {
+
+        const { domain } = req.body;
+
+        if (!domain) {
+            return res.status(400).json({
+                success: false,
+                error: "domain is required"
+            });
+        }
+
+        const {
+            processPendingDomain
+        } = require("./appClassification/DomainCategoryProcessor");
+
+        const result =
+            await processPendingDomain(domain);
+
+        return res.json({
+            success: true,
+            ...result
+        });
+
+    } catch (error) {
+
+        console.error(
+            "❌ Pending domain processing failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "Pending domain processing failed"
+        });
+    }
+});
+
+
 //==================DOMAIN CLASSIFIER REGISTER============
 
 const { registerDomain } =
