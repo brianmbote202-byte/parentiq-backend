@@ -31,6 +31,10 @@ const {
     startAppClassificationWorker
 } = require("./appClassification/AppClassificationWorker");
 
+const {
+    processPendingDomains
+} = require("./appClassification/DomainClassificationWorker");
+
 
 
 
