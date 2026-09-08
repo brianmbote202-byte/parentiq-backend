@@ -52,7 +52,7 @@ async function registerDomain(domain) {
         updatedAt: Date.now()
     };
 
-    await ref.setValue(pendingData);
+    await ref.set(pendingData);
 
     console.log(
         `🆕 UNKNOWN DOMAIN REGISTERED: ${normalizedDomain} → pending`
