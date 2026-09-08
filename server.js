@@ -149,6 +149,45 @@ app.use(cors());
 app.use(express.json());
 
 
+//==================DOMAIN CLASSIFIER REGISTER============
+
+const { registerDomain } =
+    require("./appClassification/DomainCategoryProcessor");
+
+app.post("/domain-classification/register", async (req, res) => {
+
+    try {
+
+        const { domain } = req.body;
+
+        if (!domain) {
+            return res.status(400).json({
+                success: false,
+                error: "domain is required"
+            });
+        }
+
+        const result =
+            await registerDomain(domain);
+
+        return res.json({
+            success: true,
+            ...result
+        });
+
+    } catch (error) {
+
+        console.error(
+            "❌ Domain registration endpoint failed:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            error: "Domain registration failed"
+        });
+    }
+});
 
 //=================TEST DOMAINS TEMPORARILY==========
 const { classifyDomain } = require("./appClassification/DomainClassifier");
