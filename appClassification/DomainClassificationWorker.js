@@ -56,6 +56,18 @@ async function processPendingDomains() {
                 `❌ DOMAIN CLASSIFICATION FAILED: ${domain}`,
                 error
             );
+
+            if (
+                error?.status === 429 ||
+                error?.code === "rate_limit_exceeded"
+            ) {
+
+                console.error(
+                    "🛑 OPENAI RATE LIMIT REACHED. STOPPING DOMAIN WORKER."
+                );
+
+                break;
+            }
         }
     }
 
