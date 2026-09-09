@@ -195,41 +195,82 @@ app.post("/domain-classification/register", async (req, res) => {
     }
 });
 
-//=================TEST DOMAINS TEMPORARILY==========
-const { classifyDomain } = require("./appClassification/DomainClassifier");
 
-app.post("/domain-classification/classify", async (req, res) => {
-    try {
-        const { domain } = req.body;
 
-        if (!domain) {
-            return res.status(400).json({
+//================= DOMAIN CLASSIFICATION API =================
+
+const { classifyDomain } =
+    require("./appClassification/DomainClassifier");
+
+app.post(
+    "/domain-classification/classify",
+    async (req, res) => {
+
+        try {
+
+            const { domain } =
+                req.body;
+
+            if (!domain) {
+
+                return res.status(400).json({
+                    success: false,
+                    error: "domain is required"
+                });
+            }
+
+            const normalizedDomain =
+                domain
+                    .trim()
+                    .toLowerCase()
+                    .replace(/^www\./, "");
+
+            if (!normalizedDomain) {
+
+                return res.status(400).json({
+                    success: false,
+                    error: "invalid domain"
+                });
+            }
+
+            const result =
+                await classifyDomain(
+                    normalizedDomain
+                );
+
+            return res.json({
+
+                success: true,
+
+                domain:
+                    normalizedDomain,
+
+                category:
+                    result.category,
+
+                primaryPurpose:
+                    result.primaryPurpose
+
+            });
+
+        } catch (error) {
+
+            console.error(
+                "❌ Domain classification endpoint failed:",
+                error
+            );
+
+            return res.status(500).json({
+
                 success: false,
-                error: "domain is required"
+
+                error:
+                    "Domain classification failed"
+
             });
         }
-
-        const result = await classifyDomain(domain);
-
-        return res.json({
-            success: true,
-            domain,
-            ...result
-        });
-
-    } catch (error) {
-
-        console.error(
-            "❌ Domain classification endpoint failed:",
-            error
-        );
-
-        return res.status(500).json({
-            success: false,
-            error: "Domain classification failed"
-        });
     }
-});
+);
 
 
 app.post("/app-classification/classify", async (req, res) => {
