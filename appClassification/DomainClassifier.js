@@ -1,165 +1,115 @@
+const { GoogleGenAI } = require("@google/genai");
 
-const OpenAI = require("openai");
-
-const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
+const client = new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY
 });
 
+/**
+ * Classifies a domain using Google Gemini.
+ *
+ * Returns:
+ * {
+ *   category: string,
+ *   primaryPurpose: string
+ * }
+ */
 async function classifyDomain(domain) {
 
-    if (!domain) {
-        throw new Error("domain is required");
+    if (!domain || typeof domain !== "string") {
+        throw new Error("Invalid domain supplied");
     }
 
-    const normalizedDomain =
-        domain
-            .trim()
-            .toLowerCase()
-            .replace(/^www\./, "");
+    const normalizedDomain = domain
+        .trim()
+        .toLowerCase()
+        .replace(/^www\./, "");
 
-    if (!normalizedDomain) {
-        throw new Error("domain is empty");
-    }
+    const prompt = `
+Classify the following internet domain based on its PRIMARY activity and purpose.
 
-    const response = await client.responses.create({
+Domain:
+${normalizedDomain}
 
-        model: "gpt-5.6-luna",
+Rules:
 
-        input: [
-
-            {
-                role: "system",
-
-                content: `
-You are a website domain classification service for a parental-control application.
-
-Your task is to identify the PRIMARY ACTIVITY and PRIMARY PURPOSE of the
-specific website represented by the domain.
-
-The classification is NOT restricted to a predefined category list.
-
-You may create a new category whenever necessary.
-
-IMPORTANT:
-
-First determine what the website fundamentally exists to provide to users.
-
-Then generate a concise category that represents that primary activity.
-
-The category must NOT be based simply on:
-- how the website makes money
-- whether the website accepts payments
-- whether the website is a marketplace
-- whether users can buy something
-- whether the company is a technology company
-- secondary features offered by the website
-
-When a website facilitates transactions for a particular service, classify
-the underlying service rather than the transaction mechanism.
+1. Identify what the domain primarily exists for.
+2. Do not classify based only on the domain name.
+3. Use the actual primary service or activity associated with the domain.
+4. Create a clear category using lowercase snake_case.
+5. Categories should be meaningful and reusable across many domains.
+6. Avoid overly specific categories unless necessary.
+7. Return ONLY the requested JSON structure.
 
 Examples:
 
 booking.com
-primaryPurpose → travel_booking
-category → travel
+category: travel
+primaryPurpose: hotel and travel booking
 
 airbnb.com
-primaryPurpose → accommodation_booking
-category → travel
+category: travel
+primaryPurpose: accommodation and travel booking
 
 amazon.com
-primaryPurpose → ecommerce
-category → shopping
+category: shopping
+primaryPurpose: online shopping and ecommerce
 
 indeed.com
-primaryPurpose → job_search
-category → jobs
+category: jobs
+primaryPurpose: job searching and recruitment
 
 upwork.com
-primaryPurpose → freelance_work
-category → freelancing
+category: freelancing
+primaryPurpose: freelance work marketplace
 
 wikipedia.org
-primaryPurpose → online_reference
-category → reference
+category: reference
+primaryPurpose: online encyclopedia and reference information
 
 github.com
-primaryPurpose → software_development
-category → technology
+category: technology
+primaryPurpose: software development and code hosting
 
 youtube.com
-primaryPurpose → video_streaming
-category → streaming
+category: streaming
+primaryPurpose: online video streaming
 
 instagram.com
-primaryPurpose → social_networking
-category → social_media
+category: social_media
+primaryPurpose: social networking and photo/video sharing
 
 whatsapp.com
-primaryPurpose → messaging
-category → messaging
+category: messaging
+primaryPurpose: instant messaging and communication
 
 google.com
-primaryPurpose → web_search
-category → search_engine
+category: search_engine
+primaryPurpose: internet search and online services
 
 bet365.com
-primaryPurpose → sports_betting_and_gambling
-category → betting_gambling
+category: betting_gambling
+primaryPurpose: online sports betting and gambling
 
-CATEGORY RULES:
+Now classify:
 
-- Category must describe the primary user activity.
-- Category must be concise.
-- Category must use lowercase snake_case.
-- Category must contain no spaces.
-- Category must contain exactly one category.
-- Do not automatically use "other" when a meaningful category can be
-  determined.
-- Do not use a category based only on the company's industry.
-- Do not use "shopping" merely because transactions occur on the website.
-- Do not use "finance" merely because the website processes payments.
-- Do not use "technology" merely because the website is operated by a
-  technology company.
+${normalizedDomain}
+`;
 
-PRIMARY PURPOSE RULES:
+    try {
 
-- primaryPurpose must describe the specific service or activity provided
-  by the domain.
-- primaryPurpose must be concise.
-- primaryPurpose must use lowercase snake_case.
-- primaryPurpose must contain no spaces.
-- primaryPurpose must contain exactly one purpose.
+        const interaction = await client.interactions.create({
+            model: "gemini-3.6-flash",
 
-Return JSON only.
-`
-            },
+            input: prompt,
 
-            {
-                role: "user",
-
-                content: JSON.stringify({
-                    domain: normalizedDomain
-                })
-            }
-        ],
-
-        text: {
-
-            format: {
-
-                type: "json_schema",
-
-                name: "domain_classification",
-
-                strict: true,
+            response_format: {
+                type: "text",
+                mime_type: "application/json",
 
                 schema: {
-
                     type: "object",
 
                     properties: {
-
                         category: {
                             type: "string"
                         },
@@ -167,7 +117,6 @@ Return JSON only.
                         primaryPurpose: {
                             type: "string"
                         }
-
                     },
 
                     required: [
@@ -178,45 +127,74 @@ Return JSON only.
                     additionalProperties: false
                 }
             }
+        });
+
+        const outputText = interaction.output_text;
+
+        if (!outputText) {
+            throw new Error("Gemini returned empty output");
         }
-    });
 
-    const result =
-        JSON.parse(response.output_text);
-
-    const category =
-        result.category
-            ?.trim()
-            .toLowerCase();
-
-    const primaryPurpose =
-        result.primaryPurpose
-            ?.trim()
-            .toLowerCase();
-
-    if (!category) {
-        throw new Error(
-            "Invalid domain classification returned: empty category"
+        console.log(
+            `🤖 GEMINI RAW DOMAIN RESPONSE: ${normalizedDomain} → ${outputText}`
         );
-    }
 
-    if (!primaryPurpose) {
-        throw new Error(
-            "Invalid domain classification returned: empty primaryPurpose"
+        let result;
+
+        try {
+            result = JSON.parse(outputText);
+        } catch (parseError) {
+            throw new Error(
+                `Gemini returned invalid JSON: ${outputText}`
+            );
+        }
+
+        if (
+            !result.category ||
+            typeof result.category !== "string"
+        ) {
+            throw new Error(
+                `Invalid Gemini category for ${normalizedDomain}`
+            );
+        }
+
+        if (
+            !result.primaryPurpose ||
+            typeof result.primaryPurpose !== "string"
+        ) {
+            throw new Error(
+                `Invalid Gemini primaryPurpose for ${normalizedDomain}`
+            );
+        }
+
+        const category = result.category
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "_")
+            .replace(/[^a-z0-9_]/g, "");
+
+        const primaryPurpose = result.primaryPurpose.trim();
+
+        console.log(
+            `🌐 DOMAIN CLASSIFIED BY GEMINI: ${normalizedDomain} → ${category} (${primaryPurpose})`
         );
+
+        return {
+            category,
+            primaryPurpose
+        };
+
+    } catch (error) {
+
+        console.error(
+            `❌ GEMINI DOMAIN CLASSIFICATION ERROR: ${normalizedDomain}`,
+            error
+        );
+
+        throw error;
     }
-
-    console.log(
-        `🌐 DOMAIN CLASSIFIED: ${normalizedDomain} → ${category} (${primaryPurpose})`
-    );
-
-    return {
-        category,
-        primaryPurpose
-    };
 }
 
 module.exports = {
     classifyDomain
 };
-

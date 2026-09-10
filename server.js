@@ -32,7 +32,7 @@ const {
 } = require("./appClassification/AppClassificationWorker");
 
 const {
-    processPendingDomains
+    startDomainClassificationWorker
 } = require("./appClassification/DomainClassificationWorker");
 
 
@@ -4681,7 +4681,7 @@ const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 
     startAppClassificationWorker();
-    processPendingDomains();
+    startDomainClassificationWorker();
     processPendingSearches();
 
 });
