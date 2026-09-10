@@ -36,6 +36,12 @@ const {
 } = require("./appClassification/DomainClassificationWorker");
 
 
+//===============searches categorization==========
+const {
+    processPendingSearches
+} = require("./appClassification/SearchClassificationWorker");
+
+
 
 
 const ActivityManager =
@@ -272,6 +278,146 @@ app.post(
     }
 );
 
+//================= SEARCH CLASSIFICATION API =================
+
+const { classifySearch } =
+    require("./appClassification/SearchClassifier");
+
+
+app.post(
+    "/search-classification/classify",
+    async (req, res) => {
+
+        try {
+
+            const { searchQuery } =
+                req.body;
+
+
+            if (!searchQuery) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "searchQuery is required"
+
+                });
+
+            }
+
+
+            const normalizedQuery =
+                searchQuery
+                    .trim()
+                    .toLowerCase();
+
+
+            if (!normalizedQuery) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    error:
+                        "invalid searchQuery"
+
+                });
+
+            }
+
+
+            const result =
+                await classifySearch(
+                    normalizedQuery
+                );
+
+
+            return res.json({
+
+                success: true,
+
+                searchQuery:
+                    normalizedQuery,
+
+                category:
+                    result.category,
+
+                intent:
+                    result.intent
+
+            });
+
+
+        } catch (error) {
+
+            console.error(
+                "❌ Search classification endpoint failed:",
+                error
+            );
+
+
+            return res.status(500).json({
+
+                success: false,
+
+                error:
+                    "Search classification failed"
+
+            });
+
+        }
+
+    }
+);
+//========searches temporal test==========
+app.post(
+    "/search-classification/register",
+    async (req, res) => {
+
+        try {
+
+            const { searchQuery } =
+                req.body;
+
+            if (!searchQuery) {
+                return res.status(400).json({
+                    success: false,
+                    error: "searchQuery is required"
+                });
+            }
+
+            const {
+                registerSearch
+            } =
+                require("./appClassification/SearchCategoryProcessor");
+
+            const result =
+                await registerSearch(
+                    searchQuery
+                );
+
+            return res.json({
+                success: true,
+                ...result
+            });
+
+        } catch (error) {
+
+            console.error(
+                "❌ Search registration failed:",
+                error
+            );
+
+            return res.status(500).json({
+                success: false,
+                error: "Search registration failed"
+            });
+        }
+    }
+);
+
 
 app.post("/app-classification/classify", async (req, res) => {
     try {
@@ -478,118 +624,420 @@ app.get("/", (req, res) => {
 
 
 //====================== STK PUSH ======================
-app.post("/stkpush", async (req, res) => {
+ app.post("/stkpush", async (req, res) => {
+
     try {
-        const {uid,childId,phone,planId} = req.body;
+
+        const {
+            uid,
+            childId,
+            phone,
+            planId
+        } = req.body;
+
+
+        // ==================================================
+        // VALIDATION
+        // ==================================================
 
         if (
-    !uid ||
-    !childId ||
-    !phone ||
-    !planId
-) {
+            !uid ||
+            !childId ||
+            !phone ||
+            !planId
+        ) {
 
-    return res.status(400).json({
+            return res.status(400).json({
 
-        success: false,
+                success: false,
 
-        message:
-            "uid, childId, phone and planId are required."
+                message:
+                    "uid, childId, phone and planId are required."
 
-    });
-
-}
-console.log("================================");
-console.log("NEW STK PUSH REQUEST");
-console.log("================================");
-
-console.log("Body:");
-console.log(req.body);
+            });
+        }
 
 
-const plan =
-    await PlanManager.getPlan(planId);
+        console.log("================================");
+        console.log("NEW STK PUSH REQUEST");
+        console.log("================================");
 
-    console.log("================================");
-console.log("PLAN LOADED");
-console.log("================================");
+        console.log("Body:");
+        console.log(req.body);
 
-console.log(plan);
 
-if (!plan) {
+        // ==================================================
+        // LOAD PLAN
+        // ==================================================
 
-    return res.status(400).json({
+        const plan =
+            await PlanManager.getPlan(planId);
 
-        success: false,
 
-        message: "Invalid subscription plan."
+        console.log("================================");
+        console.log("PLAN LOADED");
+        console.log("================================");
 
-    });
+        console.log(plan);
 
-}
 
-        /*const response = await stkPush( phone,plan.price,plan.name);*/
-        const response = await stkPush(phone, 1, plan.name);
-        const checkoutId = response.CheckoutRequestID;
-        const now = Date.now();
+        if (!plan) {
 
-        await db.ref(`transactions/${checkoutId}`).set({
+            return res.status(400).json({
 
-    uid,
+                success: false,
 
-    childId,
+                message:
+                    "Invalid subscription plan."
 
-    phone,
+            });
+        }
 
-    planId,
 
-    planName: plan.name,
+        // ==================================================
+        // VALIDATE PLAN PRICE
+        // ==================================================
 
-    amount: plan.price,
+        const planPrice =
+            Number(plan.price);
 
-    status: "PENDING",
 
-    processed: false,
+        if (
+            !Number.isFinite(planPrice) ||
+            planPrice <= 0
+        ) {
 
-    processing: false,
+            console.error(
+                "Invalid plan price:",
+                plan.price
+            );
 
-    createdAt: now
+            return res.status(500).json({
 
-});
+                success: false,
 
-        await db.ref(`children/${childId}`).update({
-            billing: {
-                phone,
-                lastCheckoutId: checkoutId,
-                lastPaymentStatus: "PENDING"
-            },
+                message:
+                    "Invalid subscription plan price."
 
-            subscription: {
-                status: "PENDING",
-                premium: false,
-                expiryDate: 0
-            },
+            });
+        }
 
-            meta: {
-                updatedAt: now
+
+        // ==================================================
+        // PREVENT DUPLICATE STK REQUESTS
+        // ==================================================
+
+        const transactionsSnapshot =
+            await db
+                .ref("transactions")
+                .orderByChild("phone")
+                .equalTo(phone)
+                .once("value");
+
+
+        if (transactionsSnapshot.exists()) {
+
+            const transactions =
+                transactionsSnapshot.val() || {};
+
+            const nowCheck =
+                Date.now();
+
+            const pendingEntry =
+                Object.entries(transactions)
+                    .find(([_, transaction]) => {
+
+                        if (!transaction) {
+                            return false;
+                        }
+
+
+                        if (
+                            transaction.status !==
+                            "PENDING"
+                        ) {
+                            return false;
+                        }
+
+
+                        const createdAt =
+                            Number(
+                                transaction.createdAt || 0
+                            );
+
+
+                        /*
+                         * Only block recent pending
+                         * transactions.
+                         *
+                         * Older stale transactions
+                         * will not block a new payment.
+                         */
+
+                        return (
+                            createdAt > 0 &&
+                            nowCheck - createdAt <
+                            5 * 60 * 1000
+                        );
+
+                    });
+
+
+            if (pendingEntry) {
+
+                const [
+                    pendingCheckoutId,
+                    pendingTransaction
+                ] = pendingEntry;
+
+
+                console.warn(
+                    "================================"
+                );
+
+                console.warn(
+                    "DUPLICATE STK REQUEST BLOCKED"
+                );
+
+                console.warn(
+                    "Phone:",
+                    phone
+                );
+
+                console.warn(
+                    "Existing Checkout:",
+                    pendingCheckoutId
+                );
+
+                console.warn(
+                    "Existing Plan:",
+                    pendingTransaction.planId
+                );
+
+                console.warn(
+                    "================================"
+                );
+
+
+                return res.status(409).json({
+
+                    success: false,
+
+                    message:
+                        "A payment request is already pending. Please complete or wait for the current M-Pesa prompt.",
+
+                    checkoutId:
+                        pendingCheckoutId
+
+                });
             }
-        });
+        }
+
+
+        // ==================================================
+        // SEND STK PUSH
+        // ==================================================
+
+        console.log("================================");
+        console.log("SENDING STK PUSH");
+        console.log("================================");
+
+        console.log(
+            "Phone:",
+            phone
+        );
+
+        console.log(
+            "Plan:",
+            plan.name
+        );
+
+        console.log(
+            "Amount:",
+            planPrice
+        );
+
+
+        /*
+         * IMPORTANT:
+         *
+         * Use the actual plan price.
+         *
+         * Family = 1800
+         * Premium = 750
+         */
+
+        const response =
+            await stkPush(
+                phone,
+                planPrice,
+                plan.name
+            );
+
+
+        const checkoutId =
+            response.CheckoutRequestID;
+
+
+        if (!checkoutId) {
+
+            console.error(
+                "M-Pesa did not return CheckoutRequestID"
+            );
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    "M-Pesa did not return a CheckoutRequestID."
+
+            });
+        }
+
+
+        const now =
+            Date.now();
+
+
+        // ==================================================
+        // SAVE TRANSACTION
+        // ==================================================
+
+        await db
+            .ref(`transactions/${checkoutId}`)
+            .set({
+
+                uid,
+
+                childId,
+
+                phone,
+
+                planId,
+
+                planName:
+                    plan.name,
+
+                /*
+                 * Store exactly the same amount
+                 * sent to M-Pesa.
+                 */
+
+                amount:
+                    planPrice,
+
+                status:
+                    "PENDING",
+
+                processed:
+                    false,
+
+                processing:
+                    false,
+
+                createdAt:
+                    now
+
+            });
+
+
+        // ==================================================
+        // UPDATE CHILD BILLING STATE
+        // ==================================================
+
+        await db
+            .ref(`children/${childId}`)
+            .update({
+
+                billing: {
+
+                    phone,
+
+                    lastCheckoutId:
+                        checkoutId,
+
+                    lastPaymentStatus:
+                        "PENDING"
+
+                },
+
+                subscription: {
+
+                    status:
+                        "PENDING",
+
+                    premium:
+                        false,
+
+                    expiryDate:
+                        0
+
+                },
+
+                meta: {
+
+                    updatedAt:
+                        now
+
+                }
+
+            });
+
+
+        // ==================================================
+        // SUCCESS
+        // ==================================================
+
+        console.log("================================");
+        console.log("STK PUSH SENT");
+        console.log("================================");
+
+        console.log(
+            "CheckoutRequestID:",
+            checkoutId
+        );
+
+        console.log(
+            "Amount:",
+            planPrice
+        );
+
+        console.log(
+            "Plan:",
+            plan.name
+        );
+
 
         return res.json({
+
             success: true,
+
             data: response
+
         });
+
 
     } catch (error) {
-        console.log("STK ERROR:", error.message);
+
+        console.error(
+            "STK ERROR:",
+            error
+        );
+
 
         return res.status(500).json({
-            success: false,
-            message: "STK Push failed"
-        });
-    }
-});
 
+            success: false,
+
+            message:
+                "STK Push failed"
+
+        });
+
+    }
+
+});
 
 //====================== CALLBACK ======================
 //======================================================
@@ -1203,15 +1651,14 @@ app.post("/mpesa/callback", async (req, res) => {
             );
 
 
-            await childRef
-                .child("subscription")
-                .update({
-
-                    status: "FAILED",
-
-                    premium: false
-
-                });
+             await childRef
+    .child("billing")
+    .update({
+        lastPaymentStatus: "FAILED",
+        lastCheckoutId: checkoutId,
+        lastPaymentError: resultDesc,
+        lastPaymentResultCode: resultCode
+    });
 
 
             await childRef
@@ -1381,56 +1828,257 @@ app.post("/mpesa/callback", async (req, res) => {
 
 
         /*
-        ==================================================
-        AMOUNT VALIDATION
-        ==================================================
-        */
+==================================================
+AMOUNT VALIDATION
+==================================================
+*/
 
-        /*
-        IMPORTANT:
+const expectedAmount =
+    Number(plan.price);
 
-        During your current Test B we intentionally
-        paid KES 1 while the transaction says KES 750.
+const receivedAmount =
+    Number(mpesaAmount);
 
-        Therefore we DO NOT reject the payment here yet.
+console.log(
+    "================================"
+);
 
-        Once production testing is complete, change this
-        into a strict amount check.
-        */
+console.log(
+    "AMOUNT VALIDATION"
+);
 
-        if (
-            mpesaAmount > 0 &&
-            mpesaAmount !== amount
-        ) {
+console.log(
+    "Expected Plan Amount:",
+    expectedAmount
+);
 
-            console.warn(
-                "================================"
-            );
+console.log(
+    "Transaction Amount:",
+    amount
+);
 
-            console.warn(
-                "AMOUNT MISMATCH"
-            );
+console.log(
+    "Actual M-Pesa Amount:",
+    receivedAmount
+);
 
-            console.warn(
-                "Expected:",
-                amount
-            );
+console.log(
+    "Checkout:",
+    checkoutId
+);
 
-            console.warn(
-                "Received:",
-                mpesaAmount
-            );
+console.log(
+    "================================"
+);
 
-            console.warn(
-                "Checkout:",
-                checkoutId
-            );
 
-            console.warn(
-                "================================"
-            );
+/*
+--------------------------------------------------
+TRANSACTION AMOUNT MUST MATCH PLAN PRICE
+--------------------------------------------------
+*/
 
-        }
+if (
+    !Number.isFinite(expectedAmount) ||
+    expectedAmount <= 0 ||
+    amount !== expectedAmount
+) {
+
+    console.error(
+        "================================"
+    );
+
+    console.error(
+        "TRANSACTION AMOUNT INVALID"
+    );
+
+    console.error(
+        "Plan Price:",
+        expectedAmount
+    );
+
+    console.error(
+        "Transaction Amount:",
+        amount
+    );
+
+    console.error(
+        "Checkout:",
+        checkoutId
+    );
+
+    console.error(
+        "================================"
+    );
+
+    await txRef.update({
+
+        status: "FAILED",
+
+        processed: true,
+
+        processing: false,
+
+        processingStartedAt: null,
+
+        processedAt: Date.now(),
+
+        completedAt: Date.now(),
+
+        failureReason:
+            "TRANSACTION_AMOUNT_INVALID",
+
+        expectedAmount,
+
+        transactionAmount:
+            amount,
+
+        callbackResultCode:
+            resultCode,
+
+        callbackResultDesc:
+            resultDesc
+    });
+
+    return res.json({
+        ResultCode: 0,
+        ResultDesc: "Accepted"
+    });
+}
+
+
+/*
+--------------------------------------------------
+M-PESA AMOUNT MUST EXACTLY MATCH
+--------------------------------------------------
+*/
+
+if (
+    !Number.isFinite(receivedAmount) ||
+    receivedAmount <= 0 ||
+    receivedAmount !== expectedAmount
+) {
+
+    console.error(
+        "================================"
+    );
+
+    console.error(
+        "AMOUNT MISMATCH - PAYMENT REJECTED"
+    );
+
+    console.error(
+        "Expected:",
+        expectedAmount
+    );
+
+    console.error(
+        "Received:",
+        receivedAmount
+    );
+
+    console.error(
+        "Receipt:",
+        mpesaReceipt
+    );
+
+    console.error(
+        "Phone:",
+        mpesaPhone
+    );
+
+    console.error(
+        "Checkout:",
+        checkoutId
+    );
+
+    console.error(
+        "================================"
+    );
+
+
+    /*
+    ------------------------------------------------
+    IMPORTANT:
+    NEVER activate subscription.
+    NEVER record commission.
+    NEVER credit wallet.
+    ------------------------------------------------
+    */
+
+    await txRef.update({
+
+        status: "FAILED",
+
+        processed: true,
+
+        processing: false,
+
+        processingStartedAt: null,
+
+        processedAt: Date.now(),
+
+        completedAt: Date.now(),
+
+        failureReason:
+            "AMOUNT_MISMATCH",
+
+        expectedAmount,
+
+        receivedAmount,
+
+        mpesaReceipt,
+
+        mpesaPhone,
+
+        mpesaTransactionDate:
+            transactionDate,
+
+        callbackResultCode:
+            resultCode,
+
+        callbackResultDesc:
+            resultDesc
+    });
+
+
+    /*
+    ------------------------------------------------
+    Record billing failure
+    ------------------------------------------------
+    */
+
+    await childRef
+        .child("billing")
+        .update({
+
+            lastCheckoutId:
+                checkoutId,
+
+            lastPaymentStatus:
+                "FAILED",
+
+            lastPaymentError:
+                `Amount mismatch. Expected ${expectedAmount}, received ${receivedAmount}`,
+
+            lastPaymentResultCode:
+                resultCode,
+
+            lastMpesaReceipt:
+                mpesaReceipt
+        });
+
+
+    console.error(
+        "Payment rejected because M-Pesa amount does not match plan price."
+    );
+
+
+    return res.json({
+        ResultCode: 0,
+        ResultDesc: "Accepted"
+    });
+}
 
 
         /*
@@ -4034,6 +4682,7 @@ const server = app.listen(PORT, () => {
 
     startAppClassificationWorker();
     processPendingDomains();
+    processPendingSearches();
 
 });
 
