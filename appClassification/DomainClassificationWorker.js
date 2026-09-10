@@ -1,8 +1,8 @@
-
 const { db } = require("../firebase");
 
 const {
-    processPendingDomain
+    processPendingDomain,
+    synchronizeVisitedUrls
 } = require("./DomainCategoryProcessor");
 
 
@@ -10,8 +10,15 @@ const {
 // CONFIGURATION
 // ============================================================
 
-// Maximum number of UNIQUE domains sent to Gemini per cycle.
+// Maximum number of UNIQUE pending domains sent to Gemini
+// per quota cycle.
 const MAX_DOMAINS_PER_CYCLE = 5;
+
+// Maximum number of already-classified domains synchronized
+// against historical visited URLs in one worker cycle.
+//
+// This does NOT use Gemini quota.
+const MAX_SYNC_DOMAINS_PER_CYCLE = 25;
 
 // Wait between Gemini quota batches.
 const QUOTA_INTERVAL = 60 * 1000;
@@ -38,14 +45,12 @@ function normalizeDomain(domain) {
             .trim()
             .toLowerCase();
 
-
     // Remove protocol.
     normalized =
         normalized.replace(
             /^https?:\/\//,
             ""
         );
-
 
     // Remove leading www.
     normalized =
@@ -54,26 +59,24 @@ function normalizeDomain(domain) {
             ""
         );
 
-
     // Remove anything after the hostname.
     normalized =
         normalized.split("/")[0];
-
 
     // Remove query parameters.
     normalized =
         normalized.split("?")[0];
 
-
     // Remove fragment.
     normalized =
         normalized.split("#")[0];
 
-
     // Remove trailing dot.
     normalized =
-        normalized.replace(/\.$/, "");
-
+        normalized.replace(
+            /\.$/,
+            ""
+        );
 
     return normalized.trim();
 }
@@ -82,13 +85,20 @@ function normalizeDomain(domain) {
 // ============================================================
 // PROCESS PENDING DOMAINS
 // ============================================================
+//
+// This section is responsible ONLY for domains whose Firebase
+// category is "pending".
+//
+// These domains are sent to Gemini.
+//
+// The Gemini quota limit is preserved.
+// ============================================================
 
 async function processPendingDomains() {
 
     console.log(
         "🌐 DOMAIN CLASSIFICATION WORKER: Checking for pending domains..."
     );
-
 
     const snapshot =
         await db
@@ -97,13 +107,11 @@ async function processPendingDomains() {
             .equalTo("pending")
             .once("value");
 
-
     if (!snapshot.exists()) {
 
         console.log(
             "📋 PENDING DOMAINS FOUND: 0"
         );
-
 
         return {
             processed: 0,
@@ -116,14 +124,11 @@ async function processPendingDomains() {
         };
     }
 
-
     const domains =
         snapshot.val();
 
-
     const domainKeys =
         Object.keys(domains);
-
 
     console.log(
         `📋 PENDING DOMAIN RECORDS FOUND: ${domainKeys.length}`
@@ -139,7 +144,6 @@ async function processPendingDomains() {
     const seenDomains =
         new Set();
 
-
     let duplicatesSkipped = 0;
 
 
@@ -147,7 +151,6 @@ async function processPendingDomains() {
 
         const rawDomain =
             domains[domainKey]?.domain;
-
 
         const normalizedDomain =
             normalizeDomain(rawDomain);
@@ -167,7 +170,11 @@ async function processPendingDomains() {
 
 
         // Already seen this normalized domain.
-        if (seenDomains.has(normalizedDomain)) {
+        if (
+            seenDomains.has(
+                normalizedDomain
+            )
+        ) {
 
             duplicatesSkipped++;
 
@@ -196,7 +203,6 @@ async function processPendingDomains() {
         `🔎 UNIQUE PENDING DOMAINS FOUND: ${uniqueDomains.length}`
     );
 
-
     console.log(
         `♻️ DUPLICATES SKIPPED: ${duplicatesSkipped}`
     );
@@ -217,7 +223,7 @@ async function processPendingDomains() {
 
 
     // ========================================================
-    // LIMIT THIS CYCLE TO MAXIMUM 5 UNIQUE DOMAINS
+    // LIMIT THIS GEMINI CYCLE
     // ========================================================
 
     const domainsToProcess =
@@ -236,29 +242,35 @@ async function processPendingDomains() {
 
 
     console.log(
-        `📦 THIS CYCLE: ${domainsToProcess.length} UNIQUE DOMAINS`
+        `📦 THIS GEMINI CYCLE: ${domainsToProcess.length} UNIQUE DOMAINS`
     );
 
 
     if (pendingRemaining > 0) {
 
         console.log(
-            `📋 UNIQUE DOMAINS WAITING FOR NEXT CYCLE: ${pendingRemaining}`
+            `📋 UNIQUE DOMAINS WAITING FOR NEXT GEMINI CYCLE: ${pendingRemaining}`
         );
     }
 
 
     let processed = 0;
+
     let failed = 0;
+
     let rateLimited = false;
-    let retryAfterMs = QUOTA_INTERVAL;
+
+    let retryAfterMs =
+        QUOTA_INTERVAL;
 
 
     // ========================================================
-    // CLASSIFY DOMAINS
+    // CLASSIFY DOMAINS WITH GEMINI
     // ========================================================
 
-    for (const item of domainsToProcess) {
+    for (
+        const item of domainsToProcess
+    ) {
 
         const domain =
             item.normalizedDomain;
@@ -295,9 +307,9 @@ async function processPendingDomains() {
             );
 
 
-            // ====================================================
+            // ==================================================
             // GEMINI RATE LIMIT SAFETY NET
-            // ====================================================
+            // ==================================================
 
             if (
                 error?.status === 429 ||
@@ -326,7 +338,11 @@ async function processPendingDomains() {
                         );
 
 
-                    if (!isNaN(retrySeconds)) {
+                    if (
+                        !isNaN(
+                            retrySeconds
+                        )
+                    ) {
 
                         retryAfterMs =
                             Math.ceil(
@@ -348,8 +364,7 @@ async function processPendingDomains() {
                 );
 
 
-                // Stop this cycle.
-                // The automatic worker will retry later.
+                // Stop this Gemini cycle.
                 break;
             }
         }
@@ -357,7 +372,7 @@ async function processPendingDomains() {
 
 
     // ============================================================
-    // DETERMINE WHETHER ANOTHER BATCH IS NEEDED
+    // DETERMINE WHETHER ANOTHER GEMINI BATCH IS NEEDED
     // ============================================================
 
     const quotaBatchComplete =
@@ -372,7 +387,7 @@ async function processPendingDomains() {
 
 
         console.log(
-            `📦 BATCH COMPLETE: ${processed} domains processed.`
+            `📦 GEMINI BATCH COMPLETE: ${processed} domains processed.`
         );
 
 
@@ -382,7 +397,7 @@ async function processPendingDomains() {
 
 
         console.log(
-            `⏳ NEXT BATCH IN ${Math.ceil(
+            `⏳ NEXT GEMINI BATCH IN ${Math.ceil(
                 QUOTA_INTERVAL / 1000
             )} SECONDS.`
         );
@@ -407,10 +422,264 @@ async function processPendingDomains() {
 
 
 // ============================================================
+// SYNCHRONIZE ALREADY-CLASSIFIED DOMAINS
+// ============================================================
+//
+// IMPORTANT:
+//
+// domain_categories is the SOURCE OF TRUTH.
+//
+// Example:
+//
+// domain_categories/teaforturmeric_com
+// category = food_and_cooking
+//
+// Existing visited URL:
+//
+// analytics_browsing/.../visited_urls/...
+// domain = teaforturmeric.com
+// category = general
+//
+// This function automatically corrects the historical visit.
+//
+// This synchronization DOES NOT call Gemini.
+// ============================================================
+
+async function synchronizeClassifiedDomains() {
+
+    console.log(
+        "🔄 DOMAIN VISIT SYNC: Checking already-classified domains..."
+    );
+
+
+    const snapshot =
+        await db
+            .ref("domain_categories")
+            .once("value");
+
+
+    if (!snapshot.exists()) {
+
+        console.log(
+            "📋 CLASSIFIED DOMAINS FOUND: 0"
+        );
+
+        return {
+            checked: 0,
+            synchronized: 0,
+            failed: 0
+        };
+    }
+
+
+    const domains =
+        snapshot.val();
+
+
+    const domainKeys =
+        Object.keys(domains);
+
+
+    console.log(
+        `📋 DOMAIN REGISTRY RECORDS FOUND: ${domainKeys.length}`
+    );
+
+
+    const classifiedDomains = [];
+
+    const seenDomains =
+        new Set();
+
+
+    // ========================================================
+    // BUILD UNIQUE CLASSIFIED DOMAIN LIST
+    // ========================================================
+
+    for (
+        const domainKey of domainKeys
+    ) {
+
+        const record =
+            domains[domainKey];
+
+
+        if (!record) {
+            continue;
+        }
+
+
+        const category =
+            String(
+                record.category || ""
+            )
+                .trim()
+                .toLowerCase();
+
+
+        // Do NOT synchronize pending domains here.
+        if (
+            !category ||
+            category === "pending"
+        ) {
+            continue;
+        }
+
+
+        const normalizedDomain =
+            normalizeDomain(
+                record.domain
+            );
+
+
+        if (!normalizedDomain) {
+
+            console.log(
+                `⚠️ CLASSIFIED DOMAIN HAS INVALID DOMAIN VALUE: ${domainKey}`
+            );
+
+            continue;
+        }
+
+
+        // Prevent duplicate synchronization work.
+        if (
+            seenDomains.has(
+                normalizedDomain
+            )
+        ) {
+            continue;
+        }
+
+
+        seenDomains.add(
+            normalizedDomain
+        );
+
+
+        classifiedDomains.push({
+            domainKey,
+            domain: normalizedDomain,
+            category
+        });
+    }
+
+
+    console.log(
+        `🔎 CLASSIFIED DOMAINS AVAILABLE FOR SYNC: ${classifiedDomains.length}`
+    );
+
+
+    if (
+        classifiedDomains.length === 0
+    ) {
+
+        console.log(
+            "✅ NO CLASSIFIED DOMAINS REQUIRE SYNC."
+        );
+
+        return {
+            checked: 0,
+            synchronized: 0,
+            failed: 0
+        };
+    }
+
+
+    // ========================================================
+    // LIMIT SYNC WORK PER FIREBASE CYCLE
+    // ========================================================
+
+    const domainsToSync =
+        classifiedDomains.slice(
+            0,
+            MAX_SYNC_DOMAINS_PER_CYCLE
+        );
+
+
+    if (
+        classifiedDomains.length >
+        MAX_SYNC_DOMAINS_PER_CYCLE
+    ) {
+
+        console.log(
+            `📦 SYNC LIMIT: Processing ${MAX_SYNC_DOMAINS_PER_CYCLE} of ${classifiedDomains.length} classified domains this cycle.`
+        );
+    }
+
+
+    let synchronized = 0;
+
+    let failed = 0;
+
+
+    // ========================================================
+    // SYNCHRONIZE VISITED URL RECORDS
+    // ========================================================
+
+    for (
+        const item of domainsToSync
+    ) {
+
+        try {
+
+            console.log(
+                `🔄 SYNCING VISITED URLS: ${item.domain} → ${item.category}`
+            );
+
+
+            const result =
+                await synchronizeVisitedUrls(
+                    item.domain,
+                    item.category
+                );
+
+
+            const updated =
+                Number(
+                    result?.updated || 0
+                );
+
+
+            synchronized += updated;
+
+
+            console.log(
+                `✅ DOMAIN VISIT SYNC COMPLETE: ${item.domain} → ${updated} records updated`
+            );
+
+
+        } catch (error) {
+
+            failed++;
+
+
+            console.error(
+                `❌ DOMAIN VISIT SYNC FAILED: ${item.domain}`,
+                error
+            );
+        }
+    }
+
+
+    console.log(
+        `📊 DOMAIN VISIT SYNC COMPLETE: ${domainsToSync.length} domains checked, ${synchronized} visited URL records updated, ${failed} domains failed`
+    );
+
+
+    return {
+        checked: domainsToSync.length,
+        synchronized,
+        failed
+    };
+}
+
+
+// ============================================================
 // AUTOMATIC DOMAIN WORKER
 // ============================================================
 
 let workerTimer = null;
+
 let workerRunning = false;
 
 
@@ -436,9 +705,54 @@ async function runDomainWorker() {
 
     try {
 
+        // ====================================================
+        // STEP 1
+        // PROCESS PENDING DOMAINS WITH GEMINI
+        // ====================================================
+
         const result =
             await processPendingDomains();
 
+
+        // ====================================================
+        // STEP 2
+        // SYNCHRONIZE ALREADY-CLASSIFIED DOMAINS
+        // ====================================================
+        //
+        // This is independent of Gemini quota.
+        //
+        // Therefore it runs even when there are zero pending
+        // domains.
+        // ====================================================
+
+        let syncResult;
+
+
+        try {
+
+            syncResult =
+                await synchronizeClassifiedDomains();
+
+
+        } catch (syncError) {
+
+            console.error(
+                "❌ CLASSIFIED DOMAIN SYNCHRONIZATION ERROR:",
+                syncError
+            );
+
+
+            syncResult = {
+                checked: 0,
+                synchronized: 0,
+                failed: 1
+            };
+        }
+
+
+        // ====================================================
+        // DETERMINE NEXT WORKER DELAY
+        // ====================================================
 
         let nextDelay =
             NORMAL_INTERVAL;
@@ -448,7 +762,9 @@ async function runDomainWorker() {
         // GEMINI RATE LIMIT
         // ====================================================
 
-        if (result.rateLimited) {
+        if (
+            result.rateLimited
+        ) {
 
             nextDelay =
                 result.retryAfterMs ||
@@ -469,22 +785,24 @@ async function runDomainWorker() {
 
 
         // ====================================================
-        // MORE UNIQUE DOMAINS REMAIN
+        // MORE PENDING DOMAINS REMAIN
         // ====================================================
 
-        else if (result.quotaBatchComplete) {
+        else if (
+            result.quotaBatchComplete
+        ) {
 
             nextDelay =
                 QUOTA_INTERVAL;
 
 
             console.log(
-                `🔄 DOMAIN WORKER: ${result.pendingRemaining} unique domains remain.`
+                `🔄 DOMAIN WORKER: ${result.pendingRemaining} unique pending domains remain.`
             );
 
 
             console.log(
-                `⏳ NEXT DOMAIN BATCH IN ${Math.ceil(
+                `⏳ NEXT GEMINI BATCH IN ${Math.ceil(
                     nextDelay / 1000
                 )} SECONDS.`
             );
@@ -492,7 +810,7 @@ async function runDomainWorker() {
 
 
         // ====================================================
-        // NOTHING MORE TO PROCESS
+        // NORMAL CHECK
         // ====================================================
 
         else {
@@ -502,7 +820,12 @@ async function runDomainWorker() {
 
 
             console.log(
-                "🔄 DOMAIN WORKER: No additional batch required."
+                "🔄 DOMAIN WORKER: Pending classification and classified-domain synchronization check complete."
+            );
+
+
+            console.log(
+                `🔄 VISITED URL RECORDS SYNCHRONIZED: ${syncResult.synchronized}`
             );
 
 
@@ -565,6 +888,11 @@ function startDomainClassificationWorker() {
 
 
     console.log(
+        `🔄 MAX CLASSIFIED DOMAINS PER SYNC CYCLE: ${MAX_SYNC_DOMAINS_PER_CYCLE}`
+    );
+
+
+    console.log(
         `⏱️ QUOTA INTERVAL: ${QUOTA_INTERVAL / 1000} seconds`
     );
 
@@ -587,7 +915,9 @@ function stopDomainClassificationWorker() {
 
     if (workerTimer) {
 
-        clearTimeout(workerTimer);
+        clearTimeout(
+            workerTimer
+        );
 
         workerTimer = null;
     }
@@ -607,8 +937,10 @@ module.exports = {
 
     processPendingDomains,
 
+    synchronizeClassifiedDomains,
+
     startDomainClassificationWorker,
 
     stopDomainClassificationWorker
-};
 
+};
