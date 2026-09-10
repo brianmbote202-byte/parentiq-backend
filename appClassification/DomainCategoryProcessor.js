@@ -1,24 +1,66 @@
+
 const { db } = require("../firebase");
+
 const { classifyDomain } = require("./DomainClassifier");
+
+
+// ============================================================
+// NORMALIZE DOMAIN
+// ============================================================
+
+function normalizeDomain(domain) {
+
+    if (!domain) {
+        return "";
+    }
+
+    return String(domain)
+        .trim()
+        .toLowerCase()
+        .replace(/^https?:\/\//, "")
+        .replace(/^www\./, "")
+        .split("/")[0]
+        .split("?")[0]
+        .split("#")[0]
+        .replace(/\.$/, "")
+        .trim();
+}
+
+
+// ============================================================
+// CREATE FIREBASE DOMAIN KEY
+// ============================================================
+
+function createDomainKey(domain) {
+
+    return normalizeDomain(domain)
+        .replace(/\./g, "_");
+}
+
+
+// ============================================================
+// REGISTER DOMAIN
+// ============================================================
 
 async function registerDomain(domain) {
 
     if (!domain) {
+
         throw new Error("domain is required");
+
     }
 
     const normalizedDomain =
-        domain
-            .trim()
-            .toLowerCase()
-            .replace(/^www\./, "");
+        normalizeDomain(domain);
 
     if (!normalizedDomain) {
+
         throw new Error("domain is empty");
+
     }
 
     const domainKey =
-        normalizedDomain.replace(/\./g, "_");
+        createDomainKey(normalizedDomain);
 
     const ref =
         db
@@ -38,115 +80,496 @@ async function registerDomain(domain) {
         );
 
         return {
+
             domainKey,
-            domain: normalizedDomain,
-            status: "existing",
-            category: existing.category || "pending",
-            primaryPurpose: existing.primaryPurpose || ""
+
+            domain:
+                normalizedDomain,
+
+            status:
+                "existing",
+
+            category:
+                existing.category || "pending",
+
+            primaryPurpose:
+                existing.primaryPurpose || ""
+
         };
     }
 
+
     const pendingData = {
-        domain: normalizedDomain,
-        category: "pending",
-        updatedAt: Date.now()
+
+        domain:
+            normalizedDomain,
+
+        category:
+            "pending",
+
+        updatedAt:
+            Date.now()
+
     };
 
-    await ref.set(pendingData);
+
+    await ref.set(
+        pendingData
+    );
+
 
     console.log(
         `🆕 UNKNOWN DOMAIN REGISTERED: ${normalizedDomain} → pending`
     );
 
+
     return {
+
         domainKey,
-        domain: normalizedDomain,
-        status: "registered",
-        category: "pending",
-        primaryPurpose: ""
+
+        domain:
+            normalizedDomain,
+
+        status:
+            "registered",
+
+        category:
+            "pending",
+
+        primaryPurpose:
+            ""
+
     };
 }
 
-//==========PROCESS PENDING DOMAINS===========
+
+// ============================================================
+// SYNCHRONIZE CLASSIFIED DOMAIN WITH VISITED URLS
+// ============================================================
+//
+// When Gemini classifies a domain, existing visited_urls may
+// still contain:
+//
+//     category: "general"
+//
+// because the visit was recorded while the domain was pending.
+//
+// This function updates those existing visits.
+//
+// Firebase structure:
+//
+// analytics_browsing
+//   └── childId
+//        └── visited_urls
+//             └── dateKey
+//                  └── visitKey
+//                       ├── domain
+//                       └── category
+//
+// We update only the category field.
+// Existing visit data remains untouched.
+//
+// ============================================================
+
+async function synchronizeVisitedUrls(
+    normalizedDomain,
+    category
+) {
+
+    if (
+        !normalizedDomain ||
+        !category
+    ) {
+
+        return {
+            updated: 0
+        };
+    }
+
+
+    console.log(
+        `🔄 SYNCING VISITED URLS: ${normalizedDomain} → ${category}`
+    );
+
+
+    const analyticsSnapshot =
+        await db
+            .ref("analytics_browsing")
+            .once("value");
+
+
+    if (
+        !analyticsSnapshot.exists()
+    ) {
+
+        console.log(
+            "📋 NO ANALYTICS DATA FOUND FOR DOMAIN SYNC"
+        );
+
+        return {
+            updated: 0
+        };
+    }
+
+
+    const analyticsData =
+        analyticsSnapshot.val();
+
+
+    let updatedCount = 0;
+
+
+    // ========================================================
+    // LOOP THROUGH CHILDREN
+    // ========================================================
+
+    for (
+        const childId
+        of Object.keys(analyticsData)
+    ) {
+
+        const childData =
+            analyticsData[childId];
+
+
+        if (
+            !childData ||
+            !childData.visited_urls
+        ) {
+
+            continue;
+        }
+
+
+        const visitedUrls =
+            childData.visited_urls;
+
+
+        // ====================================================
+        // LOOP THROUGH DATES
+        // ====================================================
+
+        for (
+            const dateKey
+            of Object.keys(visitedUrls)
+        ) {
+
+            const dateVisits =
+                visitedUrls[dateKey];
+
+
+            if (
+                !dateVisits ||
+                typeof dateVisits !== "object"
+            ) {
+
+                continue;
+            }
+
+
+            // =================================================
+            // LOOP THROUGH VISIT RECORDS
+            // =================================================
+
+            for (
+                const visitKey
+                of Object.keys(dateVisits)
+            ) {
+
+                const visit =
+                    dateVisits[visitKey];
+
+
+                if (
+                    !visit ||
+                    typeof visit !== "object"
+                ) {
+
+                    continue;
+                }
+
+
+                const visitDomain =
+                    normalizeDomain(
+                        visit.domain
+                    );
+
+
+                if (
+                    visitDomain !==
+                    normalizedDomain
+                ) {
+
+                    continue;
+                }
+
+
+                // =============================================
+                // ALREADY CORRECT
+                // =============================================
+
+                if (
+                    visit.category ===
+                    category
+                ) {
+
+                    continue;
+                }
+
+
+                // =============================================
+                // UPDATE ONLY CATEGORY
+                // =============================================
+
+                const visitRef =
+                    db
+                        .ref("analytics_browsing")
+                        .child(childId)
+                        .child("visited_urls")
+                        .child(dateKey)
+                        .child(visitKey);
+
+
+                await visitRef.update({
+
+                    category:
+                        category
+
+                });
+
+
+                updatedCount++;
+
+
+                console.log(
+                    `✅ VISITED URL UPDATED: ${normalizedDomain} → ${category}`
+                );
+
+                console.log(
+                    `   CHILD = ${childId}`
+                );
+
+                console.log(
+                    `   DATE = ${dateKey}`
+                );
+
+                console.log(
+                    `   ENTRY = ${visitKey}`
+                );
+            }
+        }
+    }
+
+
+    console.log(
+        `📊 VISITED URL SYNC COMPLETE: ${updatedCount} records updated for ${normalizedDomain}`
+    );
+
+
+    return {
+        updated:
+            updatedCount
+    };
+}
+
+
+// ============================================================
+// PROCESS PENDING DOMAIN
+// ============================================================
+
 async function processPendingDomain(domain) {
 
     if (!domain) {
+
         throw new Error("domain is required");
+
     }
+
 
     const normalizedDomain =
-        domain
-            .trim()
-            .toLowerCase()
-            .replace(/^www\./, "");
+        normalizeDomain(domain);
+
 
     if (!normalizedDomain) {
+
         throw new Error("domain is empty");
+
     }
 
+
     const domainKey =
-        normalizedDomain.replace(/\./g, "_");
+        createDomainKey(
+            normalizedDomain
+        );
+
 
     const ref =
         db
             .ref("domain_categories")
             .child(domainKey);
 
+
     const snapshot =
         await ref.once("value");
 
-    if (!snapshot.exists()) {
+
+    if (
+        !snapshot.exists()
+    ) {
+
         throw new Error(
             `Domain is not registered: ${normalizedDomain}`
         );
     }
 
+
     const existing =
         snapshot.val();
 
-    if (existing.category !== "pending") {
+
+    // ========================================================
+    // ALREADY CLASSIFIED
+    // ========================================================
+
+    if (
+        existing.category !==
+        "pending"
+    ) {
 
         console.log(
             `⏭️ DOMAIN ALREADY CLASSIFIED: ${normalizedDomain} → ${existing.category}`
         );
 
+
         return {
+
             domainKey,
-            domain: normalizedDomain,
-            status: "existing",
-            category: existing.category,
-            primaryPurpose: existing.primaryPurpose || ""
+
+            domain:
+                normalizedDomain,
+
+            status:
+                "existing",
+
+            category:
+                existing.category,
+
+            primaryPurpose:
+                existing.primaryPurpose || ""
+
         };
     }
+
+
+    // ========================================================
+    // GEMINI CLASSIFICATION
+    // ========================================================
 
     console.log(
         `🤖 CLASSIFYING PENDING DOMAIN: ${normalizedDomain}`
     );
 
+
     const result =
-        await classifyDomain(normalizedDomain);
+        await classifyDomain(
+            normalizedDomain
+        );
+
+
+    // ========================================================
+    // UPDATE DOMAIN REGISTRY
+    // ========================================================
 
     await ref.update({
-        category: result.category,
-        primaryPurpose: result.primaryPurpose,
-        updatedAt: Date.now()
+
+        category:
+            result.category,
+
+        primaryPurpose:
+            result.primaryPurpose,
+
+        updatedAt:
+            Date.now()
+
     });
+
 
     console.log(
         `✅ DOMAIN CLASSIFIED AND UPDATED: ${normalizedDomain} → ${result.category} (${result.primaryPurpose})`
     );
 
+
+    // ========================================================
+    // UPDATE EXISTING VISITED URLS
+    // ========================================================
+
+    try {
+
+        const syncResult =
+            await synchronizeVisitedUrls(
+                normalizedDomain,
+                result.category
+            );
+
+
+        console.log(
+            `🔄 DOMAIN VISIT SYNC: ${normalizedDomain} → ${syncResult.updated} visited URL records updated`
+        );
+
+
+    } catch (syncError) {
+
+        // ====================================================
+        // IMPORTANT:
+        //
+        // Gemini classification has already succeeded.
+        //
+        // If synchronization fails, do NOT mark the domain
+        // classification itself as failed.
+        //
+        // ====================================================
+
+        console.error(
+            `⚠️ VISITED URL SYNC FAILED FOR ${normalizedDomain}:`,
+            syncError
+        );
+
+    }
+
+
+    // ========================================================
+    // RETURN RESULT
+    // ========================================================
+
     return {
+
         domainKey,
-        domain: normalizedDomain,
-        status: "classified",
-        category: result.category,
-        primaryPurpose: result.primaryPurpose
+
+        domain:
+            normalizedDomain,
+
+        status:
+            "classified",
+
+        category:
+            result.category,
+
+        primaryPurpose:
+            result.primaryPurpose
+
     };
 }
 
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
 module.exports = {
+
     registerDomain,
+
     processPendingDomain
+
 };
 
