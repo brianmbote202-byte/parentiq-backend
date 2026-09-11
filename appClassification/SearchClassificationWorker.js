@@ -28,6 +28,14 @@ const MAX_RECENT_DATES_PER_CHILD = 3;
 // Maximum number of search records inspected per child/date.
 const MAX_SEARCH_RECORDS_PER_DATE = 200;
 
+// Only searches originating from these app categories
+// are eligible for search classification.
+const ELIGIBLE_SEARCH_APP_CATEGORIES = new Set([
+    "browser",
+    "social_media",
+    "streaming"
+]);
+
 
 // ============================================================
 // NORMALIZE SEARCH QUERY
@@ -43,39 +51,359 @@ function normalizeSearchQuery(searchQuery) {
         .trim()
         .toLowerCase()
         .replace(/\s+/g, " ");
+
+}
+
+
+// ============================================================
+// GET APP CATEGORY
+// ============================================================
+
+async function getSearchAppCategory(packageName) {
+
+    if (!packageName) {
+        return null;
+    }
+
+    const normalizedPackage =
+        String(packageName).trim();
+
+    if (!normalizedPackage) {
+        return null;
+    }
+
+    try {
+
+        const snapshot =
+            await db
+                .ref("app_categories")
+                .orderByChild("packageName")
+                .equalTo(normalizedPackage)
+                .limitToFirst(1)
+                .once("value");
+
+
+        if (!snapshot.exists()) {
+
+            console.log(
+                `⏭️ SEARCH SOURCE APP NOT CLASSIFIED: ${normalizedPackage}`
+            );
+
+            return null;
+        }
+
+
+        const records =
+            snapshot.val();
+
+        const keys =
+            Object.keys(records);
+
+
+        if (!keys.length) {
+            return null;
+        }
+
+
+        const appRecord =
+            records[keys[0]];
+
+
+        const category =
+            appRecord?.category
+                ?.trim()
+                .toLowerCase();
+
+
+        if (!category) {
+
+            console.log(
+                `⏭️ SEARCH SOURCE APP HAS NO CATEGORY: ${normalizedPackage}`
+            );
+
+            return null;
+        }
+
+
+        return category;
+
+    } catch (error) {
+
+        console.error(
+            `❌ SEARCH SOURCE APP CATEGORY LOOKUP FAILED: ${normalizedPackage}`,
+            error
+        );
+
+        return null;
+    }
+
+}
+
+
+// ============================================================
+// CHECK WHETHER SEARCH SOURCE IS ELIGIBLE
+// ============================================================
+
+async function isEligibleSearchSource(packageName) {
+
+    const category =
+        await getSearchAppCategory(
+            packageName
+        );
+
+
+    if (!category) {
+        return false;
+    }
+
+
+    if (
+        !ELIGIBLE_SEARCH_APP_CATEGORIES.has(
+            category
+        )
+    ) {
+
+        console.log(
+            `⏭️ SEARCH IGNORED: ${packageName} → ${category}`
+        );
+
+        return false;
+    }
+
+
+    console.log(
+        `🔎 SEARCH SOURCE ELIGIBLE: ${packageName} → ${category}`
+    );
+
+
+    return true;
+}
+
+
+// ============================================================
+// CLEANUP IGNORED PENDING SEARCHES
+// ============================================================
+//
+// Removes /search_categories records that are:
+//
+//     category = pending
+//
+// AND were found during the current discovery window only
+// from non-eligible application categories.
+//
+// IMPORTANT:
+//
+// If the same query was found from BOTH:
+//
+//     WhatsApp → messaging
+//     Chrome   → browser
+//
+// the query is KEPT.
+//
+// Only queries with NO eligible occurrence in the inspected
+// search-history window are deleted.
+//
+// ============================================================
+
+async function cleanupIgnoredPendingSearches(
+    eligibleQueries,
+    ignoredQueries
+) {
+
+    console.log(
+        "🧹 SEARCH CLEANUP: Checking ignored pending searches..."
+    );
+
+
+    if (
+        !ignoredQueries ||
+        ignoredQueries.size === 0
+    ) {
+
+        console.log(
+            "🧹 SEARCH CLEANUP: No ignored searches found."
+        );
+
+        return {
+            checked: 0,
+            deleted: 0,
+            kept: 0,
+            failed: 0
+        };
+    }
+
+
+    try {
+
+        const snapshot =
+            await db
+                .ref("search_categories")
+                .orderByChild("category")
+                .equalTo("pending")
+                .once("value");
+
+
+        if (!snapshot.exists()) {
+
+            console.log(
+                "🧹 SEARCH CLEANUP: No pending search records found."
+            );
+
+            return {
+                checked: 0,
+                deleted: 0,
+                kept: 0,
+                failed: 0
+            };
+        }
+
+
+        const pendingSearches =
+            snapshot.val();
+
+
+        const pendingKeys =
+            Object.keys(
+                pendingSearches
+            );
+
+
+        let checked = 0;
+        let deleted = 0;
+        let kept = 0;
+        let failed = 0;
+
+
+        for (
+            const searchKey
+            of pendingKeys
+        ) {
+
+            const record =
+                pendingSearches[
+                    searchKey
+                ];
+
+
+            if (!record?.searchQuery) {
+                continue;
+            }
+
+
+            const query =
+                normalizeSearchQuery(
+                    record.searchQuery
+                );
+
+
+            // ----------------------------------------------------
+            // Only clean searches that were actually observed
+            // during this discovery cycle.
+            // ----------------------------------------------------
+
+            if (
+                !ignoredQueries.has(query)
+            ) {
+                continue;
+            }
+
+
+            checked++;
+
+
+            // ----------------------------------------------------
+            // SAFETY CHECK:
+            //
+            // If this query was ALSO observed from an eligible
+            // source, NEVER delete it.
+            // ----------------------------------------------------
+
+            if (
+                eligibleQueries.has(query)
+            ) {
+
+                kept++;
+
+                console.log(
+                    `🛡️ SEARCH CLEANUP: KEEPING ${query} → eligible source also found`
+                );
+
+                continue;
+            }
+
+
+            // ----------------------------------------------------
+            // The query was observed only from non-eligible
+            // sources in the inspected search-history window.
+            // ----------------------------------------------------
+
+            try {
+
+                await db
+                    .ref(
+                        `search_categories/${searchKey}`
+                    )
+                    .remove();
+
+
+                deleted++;
+
+
+                console.log(
+                    `🗑️ SEARCH CLEANUP: DELETED ${query} → no eligible source`
+                );
+
+
+            } catch (error) {
+
+                failed++;
+
+
+                console.error(
+                    `❌ SEARCH CLEANUP DELETE FAILED: ${query}`,
+                    error
+                );
+
+            }
+
+        }
+
+
+        console.log(
+            `🧹 SEARCH CLEANUP COMPLETE: ${checked} checked, ${deleted} deleted, ${kept} kept, ${failed} failed`
+        );
+
+
+        return {
+            checked,
+            deleted,
+            kept,
+            failed
+        };
+
+
+    } catch (error) {
+
+        console.error(
+            "❌ SEARCH CLEANUP FAILED:",
+            error
+        );
+
+
+        return {
+            checked: 0,
+            deleted: 0,
+            kept: 0,
+            failed: 1
+        };
+
+    }
+
 }
 
 
 // ============================================================
 // DISCOVER SEARCHES FROM CHILD SEARCH HISTORY
-// ============================================================
-//
-// IMPORTANT:
-//
-// We NEVER download:
-//
-//     /analytics_browsing
-//
-// We NEVER download:
-//
-//     /analytics_browsing/{childId}/search_history
-//
-// as one giant object.
-//
-// Instead:
-//
-//     analytics_browsing
-//          ↓
-//     child IDs
-//          ↓
-//     search_history dates
-//          ↓
-//     recent dates only
-//          ↓
-//     individual search records
-//
-// This keeps Firebase reads small and prevents Render
-// Node.js heap exhaustion.
 // ============================================================
 
 async function discoverSearchesFromHistory() {
@@ -84,19 +412,44 @@ async function discoverSearchesFromHistory() {
         "🔎 SEARCH HISTORY: Checking for new child searches..."
     );
 
+
     let discovered = 0;
+    let eligible = 0;
+    let ignored = 0;
     let registered = 0;
     let existing = 0;
     let failed = 0;
 
+
+    // --------------------------------------------------------
+    // Queries observed from eligible sources.
+    // --------------------------------------------------------
+
+    const eligibleQueries =
+        new Set();
+
+
+    // --------------------------------------------------------
+    // Queries observed from ignored sources.
+    // --------------------------------------------------------
+
+    const ignoredQueries =
+        new Set();
+
+
+    // --------------------------------------------------------
+    // Prevent duplicate registration during this cycle.
+    // --------------------------------------------------------
+
     const seenQueries =
         new Set();
+
 
     try {
 
         // ====================================================
         // STEP 1
-        // GET CHILD IDs ONLY
+        // GET CHILD IDs
         // ====================================================
 
         const childrenSnapshot =
@@ -113,11 +466,20 @@ async function discoverSearchesFromHistory() {
                 "📋 SEARCH HISTORY FOUND: 0"
             );
 
+
             return {
                 discovered: 0,
+                eligible: 0,
+                ignored: 0,
                 registered: 0,
                 existing: 0,
-                failed: 0
+                failed: 0,
+                cleanup: {
+                    checked: 0,
+                    deleted: 0,
+                    kept: 0,
+                    failed: 0
+                }
             };
         }
 
@@ -149,14 +511,7 @@ async function discoverSearchesFromHistory() {
 
                 // =================================================
                 // STEP 2A
-                // GET ONLY SEARCH-HISTORY DATE KEYS
-                // =================================================
-                //
-                // We intentionally do NOT call .once("value")
-                // on search_history.
-                //
-                // We only need its immediate children (dates).
-                //
+                // GET SEARCH-HISTORY DATE NODES
                 // =================================================
 
                 const datesSnapshot =
@@ -187,7 +542,7 @@ async function discoverSearchesFromHistory() {
 
                 // =================================================
                 // STEP 2B
-                // USE ONLY THE MOST RECENT DATES
+                // USE ONLY MOST RECENT DATES
                 // =================================================
 
                 const recentDates =
@@ -285,6 +640,78 @@ async function discoverSearchesFromHistory() {
 
 
                             // =================================================
+                            // CHECK SOURCE PACKAGE
+                            // =================================================
+
+                            const packageName =
+                                searchRecord.package;
+
+
+                            if (!packageName) {
+
+                                ignored++;
+
+                                ignoredQueries.add(
+                                    query
+                                );
+
+
+                                console.log(
+                                    `⏭️ SEARCH IGNORED: ${query} → no source package`
+                                );
+
+
+                                continue;
+                            }
+
+
+                            // =================================================
+                            // ONLY BROWSER / SOCIAL MEDIA / STREAMING
+                            // =================================================
+
+                            const searchSourceIsEligible =
+                                await isEligibleSearchSource(
+                                    packageName
+                                );
+
+
+                            if (
+                                !searchSourceIsEligible
+                            ) {
+
+                                ignored++;
+
+
+                                ignoredQueries.add(
+                                    query
+                                );
+
+
+                                continue;
+                            }
+
+
+                            // =================================================
+                            // ELIGIBLE SOURCE FOUND
+                            // =================================================
+
+                            eligible++;
+
+
+                            // ------------------------------------------------
+                            // IMPORTANT:
+                            //
+                            // If this query was previously seen from an
+                            // ignored source, it is now protected because
+                            // an eligible source also exists.
+                            // ------------------------------------------------
+
+                            eligibleQueries.add(
+                                query
+                            );
+
+
+                            // =================================================
                             // GLOBAL DUPLICATE PROTECTION
                             // =================================================
 
@@ -341,6 +768,7 @@ async function discoverSearchesFromHistory() {
 
                         }
 
+
                     } catch (error) {
 
                         failed++;
@@ -354,6 +782,7 @@ async function discoverSearchesFromHistory() {
                     }
 
                 }
+
 
             } catch (error) {
 
@@ -370,16 +799,31 @@ async function discoverSearchesFromHistory() {
         }
 
 
+        // ====================================================
+        // STEP 5
+        // CLEANUP OLD PENDING SEARCHES
+        // ====================================================
+
+        const cleanup =
+            await cleanupIgnoredPendingSearches(
+                eligibleQueries,
+                ignoredQueries
+            );
+
+
         console.log(
-            `📊 SEARCH HISTORY DISCOVERY COMPLETE: ${discovered} searches found, ${registered} registered, ${existing} already known, ${failed} failed`
+            `📊 SEARCH HISTORY DISCOVERY COMPLETE: ${discovered} searches found, ${eligible} eligible, ${ignored} ignored, ${registered} registered, ${existing} already known, ${failed} failed`
         );
 
 
         return {
             discovered,
+            eligible,
+            ignored,
             registered,
             existing,
-            failed
+            failed,
+            cleanup
         };
 
 
@@ -393,9 +837,17 @@ async function discoverSearchesFromHistory() {
 
         return {
             discovered,
+            eligible,
+            ignored,
             registered,
             existing,
-            failed: failed + 1
+            failed: failed + 1,
+            cleanup: {
+                checked: 0,
+                deleted: 0,
+                kept: 0,
+                failed: 1
+            }
         };
 
     }
@@ -427,6 +879,7 @@ async function processPendingSearches() {
         console.log(
             "📋 PENDING SEARCHES FOUND: 0"
         );
+
 
         return {
             processed: 0,
@@ -640,6 +1093,7 @@ async function runSearchWorker() {
                 )} SECONDS.`
             );
 
+
         } else {
 
             console.log(
@@ -680,6 +1134,7 @@ async function runSearchWorker() {
                 runSearchWorker,
                 DEFAULT_RETRY_DELAY
             );
+
 
     } finally {
 
