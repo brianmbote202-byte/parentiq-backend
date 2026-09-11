@@ -38,9 +38,8 @@ const {
 
 //===============searches categorization==========
 const {
-    processPendingSearches
+    startSearchClassificationWorker
 } = require("./appClassification/SearchClassificationWorker");
-
 
 
 
@@ -4682,7 +4681,7 @@ const server = app.listen(PORT, () => {
 
     startAppClassificationWorker();
     startDomainClassificationWorker();
-    processPendingSearches();
+    startSearchClassificationWorker()
 
 });
 
