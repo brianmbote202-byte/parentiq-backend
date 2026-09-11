@@ -12,6 +12,9 @@ const CacheManager =
 const EventBus =
     require("../events/EventBus");    
 
+const EntitlementManager =
+    require("./EntitlementManager");    
+
 class SubscriptionManager {
 
     /**
