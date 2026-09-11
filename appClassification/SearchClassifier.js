@@ -1,9 +1,8 @@
 const OpenAI = require("openai");
 
 const client = new OpenAI({
-
-    apiKey: process.env.OPENAI_API_KEY
-
+    apiKey: process.env.GROQ_API_KEY,
+    baseURL: "https://api.groq.com/openai/v1"
 });
 
 
@@ -34,11 +33,11 @@ async function classifySearch(searchQuery) {
 
 
     const response =
-        await client.responses.create({
+        await client.chat.completions.create({
 
-            model: "gpt-5.6-luna",
+            model: "openai/gpt-oss-20b",
 
-            input: [
+            messages: [
 
                 {
 
@@ -169,11 +168,11 @@ Return JSON only.
 
             ],
 
-            text: {
+            response_format: {
 
-                format: {
+                type: "json_schema",
 
-                    type: "json_schema",
+                json_schema: {
 
                     name: "search_classification",
 
@@ -217,10 +216,21 @@ Return JSON only.
         });
 
 
-    const result =
-        JSON.parse(
-            response.output_text
+    const rawResult =
+        response.choices?.[0]?.message?.content;
+
+
+    if (!rawResult) {
+
+        throw new Error(
+            "Empty search classification response from Groq"
         );
+
+    }
+
+
+    const result =
+        JSON.parse(rawResult);
 
 
     const category =
