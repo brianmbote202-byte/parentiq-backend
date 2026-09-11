@@ -3105,8 +3105,6 @@ app.get("/premium/:childId", async (req, res) => {
     }
 });
 
-//====================== SERVER ======================
-const PORT = process.env.PORT || 3000;
 
 //======================================================
 // TEMPORARY PARENTIQ SEARCH DATA RESET
@@ -3189,6 +3187,41 @@ app.post("/admin/reset-search-data", async (req, res) => {
     }
 
 });
+
+//======================================================
+// ONE-TIME PARENTIQ SEARCH DATA RESET
+//======================================================
+
+async function resetSearchDataOnce() {
+
+    console.log("================================");
+    console.log("PARENTIQ SEARCH DATA RESET");
+    console.log("================================");
+
+    await db
+        .ref("analytics_browsing")
+        .remove();
+
+    console.log(
+        "✅ analytics_browsing deleted"
+    );
+
+    await db
+        .ref("search_categories")
+        .remove();
+
+    console.log(
+        "✅ search_categories deleted"
+    );
+
+    console.log("================================");
+    console.log("SEARCH DATA RESET COMPLETE");
+    console.log("================================");
+}
+
+//====================== SERVER ======================
+const PORT = process.env.PORT || 3000;
+
 
 
 /*
@@ -4757,16 +4790,34 @@ app.get(
 );
 
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
 
     console.log(`Server running on port ${PORT}`);
 
-    startAppClassificationWorker();
-    startDomainClassificationWorker();
-    startSearchClassificationWorker()
+    try {
+
+        await resetSearchDataOnce();
+
+        console.log(
+            "🚀 STARTING PARENTIQ WORKERS AFTER RESET"
+        );
+
+        startAppClassificationWorker();
+
+        startDomainClassificationWorker();
+
+        startSearchClassificationWorker();
+
+    } catch (error) {
+
+        console.error(
+            "❌ SEARCH DATA RESET FAILED:",
+            error
+        );
+
+    }
 
 });
-
 
 
 server.on("error", (err) => {
