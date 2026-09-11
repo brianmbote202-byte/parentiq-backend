@@ -191,18 +191,6 @@ async function isEligibleSearchSource(packageName) {
 // AND were found during the current discovery window only
 // from non-eligible application categories.
 //
-// IMPORTANT:
-//
-// If the same query was found from BOTH:
-//
-//     WhatsApp → messaging
-//     Chrome   → browser
-//
-// the query is KEPT.
-//
-// Only queries with NO eligible occurrence in the inspected
-// search-history window are deleted.
-//
 // ============================================================
 
 async function cleanupIgnoredPendingSearches(
@@ -261,7 +249,6 @@ async function cleanupIgnoredPendingSearches(
         const pendingSearches =
             snapshot.val();
 
-
         const pendingKeys =
             Object.keys(
                 pendingSearches
@@ -296,11 +283,6 @@ async function cleanupIgnoredPendingSearches(
                 );
 
 
-            // ----------------------------------------------------
-            // Only clean searches that were actually observed
-            // during this discovery cycle.
-            // ----------------------------------------------------
-
             if (
                 !ignoredQueries.has(query)
             ) {
@@ -310,13 +292,6 @@ async function cleanupIgnoredPendingSearches(
 
             checked++;
 
-
-            // ----------------------------------------------------
-            // SAFETY CHECK:
-            //
-            // If this query was ALSO observed from an eligible
-            // source, NEVER delete it.
-            // ----------------------------------------------------
 
             if (
                 eligibleQueries.has(query)
@@ -331,11 +306,6 @@ async function cleanupIgnoredPendingSearches(
                 continue;
             }
 
-
-            // ----------------------------------------------------
-            // The query was observed only from non-eligible
-            // sources in the inspected search-history window.
-            // ----------------------------------------------------
 
             try {
 
@@ -421,25 +391,13 @@ async function discoverSearchesFromHistory() {
     let failed = 0;
 
 
-    // --------------------------------------------------------
-    // Queries observed from eligible sources.
-    // --------------------------------------------------------
-
     const eligibleQueries =
         new Set();
 
 
-    // --------------------------------------------------------
-    // Queries observed from ignored sources.
-    // --------------------------------------------------------
-
     const ignoredQueries =
         new Set();
 
-
-    // --------------------------------------------------------
-    // Prevent duplicate registration during this cycle.
-    // --------------------------------------------------------
 
     const seenQueries =
         new Set();
@@ -509,11 +467,6 @@ async function discoverSearchesFromHistory() {
                 );
 
 
-                // =================================================
-                // STEP 2A
-                // GET SEARCH-HISTORY DATE NODES
-                // =================================================
-
                 const datesSnapshot =
                     await db
                         .ref(
@@ -539,11 +492,6 @@ async function discoverSearchesFromHistory() {
                         searchHistory
                     );
 
-
-                // =================================================
-                // STEP 2B
-                // USE ONLY MOST RECENT DATES
-                // =================================================
 
                 const recentDates =
                     dateKeys
@@ -630,7 +578,6 @@ async function discoverSearchesFromHistory() {
                                 );
 
 
-                            // Ignore empty searches.
                             if (!query) {
                                 continue;
                             }
@@ -638,10 +585,6 @@ async function discoverSearchesFromHistory() {
 
                             discovered++;
 
-
-                            // =================================================
-                            // CHECK SOURCE PACKAGE
-                            // =================================================
 
                             const packageName =
                                 searchRecord.package;
@@ -665,10 +608,6 @@ async function discoverSearchesFromHistory() {
                             }
 
 
-                            // =================================================
-                            // ONLY BROWSER / SOCIAL MEDIA / STREAMING
-                            // =================================================
-
                             const searchSourceIsEligible =
                                 await isEligibleSearchSource(
                                     packageName
@@ -681,39 +620,21 @@ async function discoverSearchesFromHistory() {
 
                                 ignored++;
 
-
                                 ignoredQueries.add(
                                     query
                                 );
-
 
                                 continue;
                             }
 
 
-                            // =================================================
-                            // ELIGIBLE SOURCE FOUND
-                            // =================================================
-
                             eligible++;
 
-
-                            // ------------------------------------------------
-                            // IMPORTANT:
-                            //
-                            // If this query was previously seen from an
-                            // ignored source, it is now protected because
-                            // an eligible source also exists.
-                            // ------------------------------------------------
 
                             eligibleQueries.add(
                                 query
                             );
 
-
-                            // =================================================
-                            // GLOBAL DUPLICATE PROTECTION
-                            // =================================================
 
                             if (
                                 seenQueries.has(query)
@@ -1019,6 +940,440 @@ async function processPendingSearches() {
 
 
 // ============================================================
+// SYNC CLASSIFIED SEARCHES BACK TO SEARCH HISTORY
+// ============================================================
+//
+// IMPORTANT:
+//
+// search_categories is the authoritative source for:
+//
+//     category
+//     intent
+//
+// This function NEVER changes:
+//
+//     riskLevel
+//     engine
+//     package
+//     query
+//     createdAt
+//     time
+//
+// There is NO Groq call here.
+//
+// ============================================================
+
+async function syncClassifiedSearchesToHistory() {
+
+    console.log(
+        "🔄 SEARCH SYNC: Synchronizing classifications back to search history..."
+    );
+
+
+    let recordsChecked = 0;
+    let eligibleRecords = 0;
+    let updated = 0;
+    let alreadyCorrect = 0;
+    let noClassification = 0;
+    let pending = 0;
+    let failed = 0;
+
+
+    try {
+
+        // ====================================================
+        // GET CHILDREN
+        // ====================================================
+
+        const childrenSnapshot =
+            await db
+                .ref("analytics_browsing")
+                .orderByKey()
+                .limitToFirst(100)
+                .once("value");
+
+
+        if (!childrenSnapshot.exists()) {
+
+            console.log(
+                "🔄 SEARCH SYNC: No children found."
+            );
+
+            return {
+                recordsChecked,
+                eligibleRecords,
+                updated,
+                alreadyCorrect,
+                noClassification,
+                pending,
+                failed
+            };
+        }
+
+
+        const childIds =
+            Object.keys(
+                childrenSnapshot.val()
+            );
+
+
+        // ====================================================
+        // PROCESS EACH CHILD
+        // ====================================================
+
+        for (const childId of childIds) {
+
+            try {
+
+                const historySnapshot =
+                    await db
+                        .ref(
+                            `analytics_browsing/${childId}/search_history`
+                        )
+                        .orderByKey()
+                        .once("value");
+
+
+                if (!historySnapshot.exists()) {
+                    continue;
+                }
+
+
+                const searchHistory =
+                    historySnapshot.val();
+
+
+                const dateKeys =
+                    Object.keys(
+                        searchHistory
+                    )
+                    .sort()
+                    .reverse()
+                    .slice(
+                        0,
+                        MAX_RECENT_DATES_PER_CHILD
+                    );
+
+
+                // =================================================
+                // PROCESS RECENT DATES
+                // =================================================
+
+                for (const dateKey of dateKeys) {
+
+                    try {
+
+                        const dailySnapshot =
+                            await db
+                                .ref(
+                                    `analytics_browsing/${childId}/search_history/${dateKey}`
+                                )
+                                .orderByKey()
+                                .limitToLast(
+                                    MAX_SEARCH_RECORDS_PER_DATE
+                                )
+                                .once("value");
+
+
+                        if (!dailySnapshot.exists()) {
+                            continue;
+                        }
+
+
+                        const dailySearches =
+                            dailySnapshot.val();
+
+
+                        for (
+                            const searchId
+                            of Object.keys(dailySearches)
+                        ) {
+
+                            const searchRecord =
+                                dailySearches[
+                                    searchId
+                                ];
+
+
+                            if (!searchRecord) {
+                                continue;
+                            }
+
+
+                            recordsChecked++;
+
+
+                            const query =
+                                normalizeSearchQuery(
+                                    searchRecord.query
+                                );
+
+
+                            if (!query) {
+                                continue;
+                            }
+
+
+                            // =================================================
+                            // ONLY ELIGIBLE SEARCH SOURCES
+                            // =================================================
+
+                            const packageName =
+                                searchRecord.package;
+
+
+                            const eligible =
+                                await isEligibleSearchSource(
+                                    packageName
+                                );
+
+
+                            if (!eligible) {
+                                continue;
+                            }
+
+
+                            eligibleRecords++;
+
+
+                            // =================================================
+                            // FIND CLASSIFICATION
+                            // =================================================
+                            //
+                            // search_categories.searchQuery is the
+                            // authoritative lookup.
+                            //
+                            // No Groq request is made here.
+                            //
+                            // =================================================
+
+                            let classificationSnapshot;
+
+
+                            try {
+
+                                classificationSnapshot =
+                                    await db
+                                        .ref("search_categories")
+                                        .orderByChild("searchQuery")
+                                        .equalTo(query)
+                                        .limitToFirst(1)
+                                        .once("value");
+
+                            } catch (lookupError) {
+
+                                failed++;
+
+                                console.error(
+                                    `❌ SEARCH SYNC LOOKUP FAILED: ${query}`,
+                                    lookupError
+                                );
+
+                                continue;
+                            }
+
+
+                            if (
+                                !classificationSnapshot.exists()
+                            ) {
+
+                                noClassification++;
+
+                                continue;
+                            }
+
+
+                            const classifications =
+                                classificationSnapshot.val();
+
+
+                            const classificationKeys =
+                                Object.keys(
+                                    classifications
+                                );
+
+
+                            if (
+                                !classificationKeys.length
+                            ) {
+
+                                noClassification++;
+
+                                continue;
+                            }
+
+
+                            const classification =
+                                classifications[
+                                    classificationKeys[0]
+                                ];
+
+
+                            if (!classification) {
+
+                                noClassification++;
+
+                                continue;
+                            }
+
+
+                            // =================================================
+                            // DO NOT SYNC PENDING RECORDS
+                            // =================================================
+
+                            const category =
+                                classification.category
+                                    ?.trim()
+                                    .toLowerCase();
+
+
+                            const intent =
+                                classification.intent
+                                    ?.trim();
+
+
+                            if (
+                                !category ||
+                                category === "pending" ||
+                                !intent
+                            ) {
+
+                                pending++;
+
+                                continue;
+                            }
+
+
+                            // =================================================
+                            // CHECK WHETHER HISTORY ALREADY MATCHES
+                            // =================================================
+
+                            const currentCategory =
+                                searchRecord.category
+                                    ?.trim()
+                                    .toLowerCase() || "";
+
+
+                            const currentIntent =
+                                searchRecord.intent
+                                    ?.trim() || "";
+
+
+                            if (
+                                currentCategory === category &&
+                                currentIntent === intent
+                            ) {
+
+                                alreadyCorrect++;
+
+                                continue;
+                            }
+
+
+                            // =================================================
+                            // UPDATE ONLY CATEGORY + INTENT
+                            // =================================================
+                            //
+                            // IMPORTANT:
+                            //
+                            // update() changes ONLY these two fields.
+                            //
+                            // riskLevel remains untouched.
+                            // engine remains untouched.
+                            // package remains untouched.
+                            // query remains untouched.
+                            // timestamps remain untouched.
+                            //
+                            // =================================================
+
+                            const historyPath =
+                                `analytics_browsing/${childId}/search_history/${dateKey}/${searchId}`;
+
+
+                            await db
+                                .ref(historyPath)
+                                .update({
+                                    category,
+                                    intent
+                                });
+
+
+                            updated++;
+
+
+                            console.log(
+                                `🔄 SEARCH SYNC UPDATED: ${query} → ${category} (${intent})`
+                            );
+
+                        }
+
+                    } catch (dateError) {
+
+                        failed++;
+
+                        console.error(
+                            `❌ SEARCH SYNC DATE FAILED: ${childId}/${dateKey}`,
+                            dateError
+                        );
+
+                    }
+
+                }
+
+            } catch (childError) {
+
+                failed++;
+
+                console.error(
+                    `❌ SEARCH SYNC CHILD FAILED: ${childId}`,
+                    childError
+                );
+
+            }
+
+        }
+
+
+        console.log(
+            `📊 SEARCH SYNC COMPLETE: ${recordsChecked} records checked, ${eligibleRecords} eligible, ${updated} updated, ${alreadyCorrect} already correct, ${noClassification} without classification, ${pending} pending, ${failed} failed`
+        );
+
+
+        return {
+            recordsChecked,
+            eligibleRecords,
+            updated,
+            alreadyCorrect,
+            noClassification,
+            pending,
+            failed
+        };
+
+
+    } catch (error) {
+
+        console.error(
+            "❌ SEARCH SYNC FAILED:",
+            error
+        );
+
+
+        return {
+            recordsChecked,
+            eligibleRecords,
+            updated,
+            alreadyCorrect,
+            noClassification,
+            pending,
+            failed: failed + 1
+        };
+
+    }
+
+}
+
+
+// ============================================================
 // AUTOMATIC SEARCH WORKER
 // ============================================================
 
@@ -1067,6 +1422,19 @@ async function runSearchWorker() {
 
         // ====================================================
         // STEP 3
+        // SYNCHRONIZE CLASSIFICATIONS BACK TO HISTORY
+        // ====================================================
+        //
+        // This runs AFTER classification so newly classified
+        // searches can be synchronized during the same cycle.
+        //
+        // ====================================================
+
+        await syncClassifiedSearchesToHistory();
+
+
+        // ====================================================
+        // STEP 4
         // DETERMINE NEXT CHECK
         // ====================================================
 
@@ -1097,7 +1465,7 @@ async function runSearchWorker() {
         } else {
 
             console.log(
-                "🔄 SEARCH WORKER: Discovery and classification check complete."
+                "🔄 SEARCH WORKER: Discovery, classification and synchronization check complete."
             );
 
 
@@ -1204,6 +1572,8 @@ module.exports = {
     discoverSearchesFromHistory,
 
     processPendingSearches,
+
+    syncClassifiedSearchesToHistory,
 
     startSearchClassificationWorker,
 
