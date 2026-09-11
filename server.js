@@ -3192,27 +3192,96 @@ app.post("/admin/reset-search-data", async (req, res) => {
 // ONE-TIME PARENTIQ SEARCH DATA RESET
 //======================================================
 
+//======================================================
+// ONE-TIME PARENTIQ SEARCH DATA RESET
+//======================================================
+
 async function resetSearchDataOnce() {
 
     console.log("================================");
     console.log("PARENTIQ SEARCH DATA RESET");
     console.log("================================");
 
-    await db
-        .ref("analytics_browsing")
-        .remove();
+    /*
+     * analytics_browsing is too large to delete
+     * with one Firebase request.
+     *
+     * Delete each child separately instead.
+     */
+
+    const analyticsSnapshot =
+        await db
+            .ref("analytics_browsing")
+            .once("value");
+
+    const childIds =
+        analyticsSnapshot.exists()
+            ? Object.keys(analyticsSnapshot.val())
+            : [];
 
     console.log(
-        "✅ analytics_browsing deleted"
+        `👶 ANALYTICS CHILDREN TO DELETE: ${childIds.length}`
     );
 
-    await db
-        .ref("search_categories")
-        .remove();
+    let deletedChildren = 0;
+
+    for (const childId of childIds) {
+
+        await db
+            .ref(`analytics_browsing/${childId}`)
+            .remove();
+
+        deletedChildren++;
+
+        console.log(
+            `🗑️ DELETED ANALYTICS CHILD: ${childId} (${deletedChildren}/${childIds.length})`
+        );
+    }
 
     console.log(
-        "✅ search_categories deleted"
+        `✅ analytics_browsing reset complete: ${deletedChildren} children deleted`
     );
+
+
+    /*
+     * search_categories should be much smaller,
+     * but delete its records individually as well
+     * so we never depend on one large Firebase write.
+     */
+
+    const searchSnapshot =
+        await db
+            .ref("search_categories")
+            .once("value");
+
+    const searchKeys =
+        searchSnapshot.exists()
+            ? Object.keys(searchSnapshot.val())
+            : [];
+
+    console.log(
+        `🔎 SEARCH CATEGORIES TO DELETE: ${searchKeys.length}`
+    );
+
+    let deletedSearchCategories = 0;
+
+    for (const searchKey of searchKeys) {
+
+        await db
+            .ref(`search_categories/${searchKey}`)
+            .remove();
+
+        deletedSearchCategories++;
+
+        console.log(
+            `🗑️ DELETED SEARCH CATEGORY: ${searchKey} (${deletedSearchCategories}/${searchKeys.length})`
+        );
+    }
+
+    console.log(
+        `✅ search_categories reset complete: ${deletedSearchCategories} records deleted`
+    );
+
 
     console.log("================================");
     console.log("SEARCH DATA RESET COMPLETE");
@@ -4818,6 +4887,7 @@ const server = app.listen(PORT, async () => {
     }
 
 });
+
 
 
 server.on("error", (err) => {
