@@ -3108,6 +3108,88 @@ app.get("/premium/:childId", async (req, res) => {
 //====================== SERVER ======================
 const PORT = process.env.PORT || 3000;
 
+//======================================================
+// TEMPORARY PARENTIQ SEARCH DATA RESET
+//======================================================
+
+app.post("/admin/reset-search-data", async (req, res) => {
+
+    try {
+
+        console.log("================================");
+        console.log("PARENTIQ SEARCH DATA RESET");
+        console.log("================================");
+
+        /*
+         * DELETE SEARCH HISTORY
+         *
+         * This removes:
+         *
+         * analytics_browsing/{childId}/...
+         */
+
+        await db
+            .ref("analytics_browsing")
+            .remove();
+
+        console.log(
+            "✅ analytics_browsing deleted"
+        );
+
+
+        /*
+         * DELETE SEARCH CLASSIFICATION DATA
+         *
+         * This removes:
+         *
+         * search_categories/...
+         */
+
+        await db
+            .ref("search_categories")
+            .remove();
+
+        console.log(
+            "✅ search_categories deleted"
+        );
+
+
+        console.log("================================");
+        console.log("SEARCH DATA RESET COMPLETE");
+        console.log("================================");
+
+
+        return res.json({
+
+            success: true,
+
+            message:
+                "analytics_browsing and search_categories have been deleted."
+
+        });
+
+    }
+
+    catch (error) {
+
+        console.error(
+            "❌ SEARCH DATA RESET FAILED:",
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            error:
+                error.message
+
+        });
+
+    }
+
+});
+
 
 /*
 ==========================================
@@ -4684,6 +4766,8 @@ const server = app.listen(PORT, () => {
     startSearchClassificationWorker()
 
 });
+
+
 
 server.on("error", (err) => {
 
