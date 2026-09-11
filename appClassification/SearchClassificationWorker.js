@@ -21,6 +21,13 @@ const NORMAL_INTERVAL = 30 * 1000;
 // Safety retry delay.
 const DEFAULT_RETRY_DELAY = 60 * 1000;
 
+// Maximum number of recent search-history dates inspected
+// for each child during one discovery cycle.
+const MAX_RECENT_DATES_PER_CHILD = 3;
+
+// Maximum number of search records inspected per child/date.
+const MAX_SEARCH_RECORDS_PER_DATE = 200;
+
 
 // ============================================================
 // NORMALIZE SEARCH QUERY
@@ -45,21 +52,30 @@ function normalizeSearchQuery(searchQuery) {
 //
 // IMPORTANT:
 //
-// Do NOT read:
+// We NEVER download:
 //
 //     /analytics_browsing
 //
-// as one giant snapshot.
+// We NEVER download:
 //
-// That downloads visited URLs, search history and all other
-// analytics into Node.js memory and can cause Render OOM.
+//     /analytics_browsing/{childId}/search_history
+//
+// as one giant object.
 //
 // Instead:
 //
-// 1. Find child IDs one at a time.
-// 2. Read only that child's search_history.
-// 3. Release the child data before moving to the next child.
+//     analytics_browsing
+//          ↓
+//     child IDs
+//          ↓
+//     search_history dates
+//          ↓
+//     recent dates only
+//          ↓
+//     individual search records
 //
+// This keeps Firebase reads small and prevents Render
+// Node.js heap exhaustion.
 // ============================================================
 
 async function discoverSearchesFromHistory() {
@@ -79,7 +95,8 @@ async function discoverSearchesFromHistory() {
     try {
 
         // ====================================================
-        // GET CHILD IDs WITHOUT DOWNLOADING THE FULL TREE
+        // STEP 1
+        // GET CHILD IDs ONLY
         // ====================================================
 
         const childrenSnapshot =
@@ -88,6 +105,7 @@ async function discoverSearchesFromHistory() {
                 .orderByKey()
                 .limitToFirst(100)
                 .once("value");
+
 
         if (!childrenSnapshot.exists()) {
 
@@ -109,12 +127,14 @@ async function discoverSearchesFromHistory() {
                 childrenSnapshot.val()
             );
 
+
         console.log(
             `👶 SEARCH HISTORY CHILDREN FOUND: ${childIds.length}`
         );
 
 
         // ====================================================
+        // STEP 2
         // PROCESS ONE CHILD AT A TIME
         // ====================================================
 
@@ -127,133 +147,209 @@ async function discoverSearchesFromHistory() {
                 );
 
 
-                // IMPORTANT:
-                // Only load search_history.
+                // =================================================
+                // STEP 2A
+                // GET ONLY SEARCH-HISTORY DATE KEYS
+                // =================================================
                 //
-                // Do NOT load:
+                // We intentionally do NOT call .once("value")
+                // on search_history.
                 //
-                // /analytics_browsing/{childId}
+                // We only need its immediate children (dates).
                 //
-                const searchHistorySnapshot =
+                // =================================================
+
+                const datesSnapshot =
                     await db
                         .ref(
                             `analytics_browsing/${childId}/search_history`
                         )
+                        .orderByKey()
                         .once("value");
 
 
                 if (
-                    !searchHistorySnapshot.exists()
+                    !datesSnapshot.exists()
                 ) {
                     continue;
                 }
 
 
                 const searchHistory =
-                    searchHistorySnapshot.val();
+                    datesSnapshot.val();
+
+
+                const dateKeys =
+                    Object.keys(
+                        searchHistory
+                    );
 
 
                 // =================================================
-                // DATES
+                // STEP 2B
+                // USE ONLY THE MOST RECENT DATES
                 // =================================================
 
-                for (
-                    const dateKey of
-                    Object.keys(searchHistory)
-                ) {
-
-                    const dailySearches =
-                        searchHistory[dateKey];
-
-                    if (!dailySearches) {
-                        continue;
-                    }
+                const recentDates =
+                    dateKeys
+                        .sort()
+                        .reverse()
+                        .slice(
+                            0,
+                            MAX_RECENT_DATES_PER_CHILD
+                        );
 
 
-                    // =============================================
-                    // SEARCH RECORDS
-                    // =============================================
-
-                    for (
-                        const searchId of
-                        Object.keys(dailySearches)
-                    ) {
-
-                        const searchRecord =
-                            dailySearches[searchId];
-
-                        if (!searchRecord) {
-                            continue;
-                        }
+                console.log(
+                    `📅 SEARCH HISTORY DATES: ${childId} → ${recentDates.length} recent dates checked`
+                );
 
 
-                        const query =
-                            normalizeSearchQuery(
-                                searchRecord.query
-                            );
+                // =================================================
+                // STEP 3
+                // PROCESS EACH RECENT DATE
+                // =================================================
 
+                for (const dateKey of recentDates) {
 
-                        // Ignore empty searches.
-                        if (!query) {
-                            continue;
-                        }
+                    try {
 
+                        const dailySnapshot =
+                            await db
+                                .ref(
+                                    `analytics_browsing/${childId}/search_history/${dateKey}`
+                                )
+                                .orderByKey()
+                                .limitToLast(
+                                    MAX_SEARCH_RECORDS_PER_DATE
+                                )
+                                .once("value");
 
-                        discovered++;
-
-
-                        // =========================================
-                        // GLOBAL DUPLICATE PROTECTION
-                        // =========================================
-                        //
-                        // The same search performed by multiple
-                        // children only needs one global category.
-                        //
 
                         if (
-                            seenQueries.has(query)
+                            !dailySnapshot.exists()
                         ) {
                             continue;
                         }
 
-                        seenQueries.add(query);
+
+                        const dailySearches =
+                            dailySnapshot.val();
 
 
-                        try {
+                        const searchIds =
+                            Object.keys(
+                                dailySearches
+                            );
 
-                            const result =
-                                await registerSearch(
-                                    query
+
+                        console.log(
+                            `🔎 SEARCH RECORDS: ${childId}/${dateKey} → ${searchIds.length}`
+                        );
+
+
+                        // =================================================
+                        // STEP 4
+                        // PROCESS SEARCH RECORDS
+                        // =================================================
+
+                        for (
+                            const searchId
+                            of searchIds
+                        ) {
+
+                            const searchRecord =
+                                dailySearches[
+                                    searchId
+                                ];
+
+
+                            if (!searchRecord) {
+                                continue;
+                            }
+
+
+                            const query =
+                                normalizeSearchQuery(
+                                    searchRecord.query
                                 );
 
+
+                            // Ignore empty searches.
+                            if (!query) {
+                                continue;
+                            }
+
+
+                            discovered++;
+
+
+                            // =================================================
+                            // GLOBAL DUPLICATE PROTECTION
+                            // =================================================
 
                             if (
-                                result.status ===
-                                "registered"
+                                seenQueries.has(query)
                             ) {
+                                continue;
+                            }
 
-                                registered++;
 
-                                console.log(
-                                    `🆕 UNKNOWN SEARCH REGISTERED: ${query} → pending`
+                            seenQueries.add(
+                                query
+                            );
+
+
+                            try {
+
+                                const result =
+                                    await registerSearch(
+                                        query
+                                    );
+
+
+                                if (
+                                    result.status ===
+                                    "registered"
+                                ) {
+
+                                    registered++;
+
+
+                                    console.log(
+                                        `🆕 UNKNOWN SEARCH REGISTERED: ${query} → pending`
+                                    );
+
+                                } else {
+
+                                    existing++;
+
+                                }
+
+
+                            } catch (error) {
+
+                                failed++;
+
+
+                                console.error(
+                                    `❌ SEARCH REGISTRATION FAILED: ${query}`,
+                                    error
                                 );
-
-                            } else {
-
-                                existing++;
 
                             }
 
-                        } catch (error) {
-
-                            failed++;
-
-                            console.error(
-                                `❌ SEARCH REGISTRATION FAILED: ${query}`,
-                                error
-                            );
-
                         }
+
+                    } catch (error) {
+
+                        failed++;
+
+
+                        console.error(
+                            `❌ DAILY SEARCH HISTORY READ FAILED: ${childId}/${dateKey}`,
+                            error
+                        );
 
                     }
 
@@ -262,6 +358,7 @@ async function discoverSearchesFromHistory() {
             } catch (error) {
 
                 failed++;
+
 
                 console.error(
                     `❌ SEARCH HISTORY READ FAILED: ${childId}`,
@@ -285,12 +382,14 @@ async function discoverSearchesFromHistory() {
             failed
         };
 
+
     } catch (error) {
 
         console.error(
             "❌ SEARCH HISTORY DISCOVERY ERROR:",
             error
         );
+
 
         return {
             discovered,
@@ -340,6 +439,7 @@ async function processPendingSearches() {
     const searches =
         snapshot.val();
 
+
     const searchKeys =
         Object.keys(searches);
 
@@ -379,7 +479,9 @@ async function processPendingSearches() {
     ) {
 
         const searchQuery =
-            searches[searchKey]?.searchQuery;
+            searches[
+                searchKey
+            ]?.searchQuery;
 
 
         if (!searchQuery) {
@@ -429,7 +531,8 @@ async function processPendingSearches() {
 
             if (
                 error?.status === 429 ||
-                error?.code === "rate_limit_exceeded"
+                error?.code ===
+                    "rate_limit_exceeded"
             ) {
 
                 rateLimited = true;
@@ -572,13 +675,11 @@ async function runSearchWorker() {
         );
 
 
-        // Keep worker alive after unexpected errors.
         workerTimer =
             setTimeout(
                 runSearchWorker,
                 DEFAULT_RETRY_DELAY
             );
-
 
     } finally {
 
@@ -610,7 +711,6 @@ function startSearchClassificationWorker() {
     );
 
 
-    // Run immediately.
     runSearchWorker();
 
 }
