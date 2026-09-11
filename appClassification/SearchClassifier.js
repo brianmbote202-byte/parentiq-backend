@@ -1,12 +1,46 @@
+
 const OpenAI = require("openai");
 
-const client = new OpenAI({
-    apiKey: process.env.GROQ_API_KEY,
-    baseURL: "https://api.groq.com/openai/v1"
-});
+
+// ============================================================
+// GROQ CONFIGURATION
+// ============================================================
+
+const groqApiKey =
+    process.env.GROQ_API_KEY;
 
 
-async function classifySearch(searchQuery) {
+console.log(
+    "🔐 GROQ API KEY STATUS:",
+    groqApiKey
+        ? `PRESENT (${groqApiKey.length} characters)`
+        : "MISSING"
+);
+
+
+const client =
+    new OpenAI({
+
+        apiKey:
+            groqApiKey,
+
+        baseURL:
+            "https://api.groq.com/openai/v1"
+
+    });
+
+
+// ============================================================
+// CLASSIFY SEARCH
+// ============================================================
+
+async function classifySearch(
+    searchQuery
+) {
+
+    // ========================================================
+    // VALIDATE INPUT
+    // ========================================================
 
     if (!searchQuery) {
 
@@ -18,9 +52,10 @@ async function classifySearch(searchQuery) {
 
 
     const normalizedQuery =
-        searchQuery
+        String(searchQuery)
             .trim()
-            .toLowerCase();
+            .toLowerCase()
+            .replace(/\s+/g, " ");
 
 
     if (!normalizedQuery) {
@@ -32,192 +67,577 @@ async function classifySearch(searchQuery) {
     }
 
 
-    const response =
-        await client.chat.completions.create({
+    console.log(
+        `🔎 SEARCH AI CLASSIFICATION REQUEST: ${normalizedQuery}`
+    );
 
-            model: "openai/gpt-oss-20b",
 
-            messages: [
+    // ========================================================
+    // GROQ CLASSIFICATION
+    // ========================================================
 
-                {
+    let response;
 
-                    role: "system",
 
-                    content: `
+    try {
 
-You are a search query classification service for a parental-control application.
+        response =
+            await client.chat.completions.create({
 
-Your task is to identify the PRIMARY ACTIVITY, SUBJECT, or INTENT represented by
-the user's search query.
+                model:
+                    "openai/gpt-oss-20b",
 
-The classification is NOT restricted to a predefined category list.
 
-You may create a new category whenever necessary.
+                messages: [
+
+                    // ==================================================
+                    // SYSTEM PROMPT
+                    // ==================================================
+
+                    {
+
+                        role:
+                            "system",
+
+
+                        content: `
+
+You are the search-query classification engine for a parental-control application.
+
+YOUR JOB IS CLASSIFICATION ONLY.
+
+You receive a search query made on a monitored device.
+
+Your task is to identify what the person is primarily searching for,
+learning about, looking for, or attempting to accomplish.
 
 IMPORTANT:
 
-First determine what the user is fundamentally trying to find, learn, do,
-or accomplish through the search.
+You MUST CLASSIFY THE SEARCH.
 
-Then generate a concise category that represents that primary activity.
+Do NOT answer the search query.
 
-The category must NOT be based simply on:
+Do NOT provide instructions.
 
-- individual keywords in the query
-- the search engine being used
-- the website where the search occurred
-- how the user might eventually spend money
-- whether the result could contain advertisements
-- a secondary meaning when a clear primary intent exists
+Do NOT provide recommendations.
 
-CATEGORY RULES:
+Do NOT provide methods.
 
-- Category must describe the primary user activity or subject.
-- Category must be concise.
-- Category must use lowercase snake_case.
-- Category must contain no spaces.
-- Category must contain exactly one category.
-- Do not automatically use "other" when a meaningful category can be
-  determined.
-- Create a new category when an existing concept does not accurately
-  represent the query.
+Do NOT provide links.
 
-INTENT RULES:
+Do NOT provide providers.
 
-- intent must describe what the user is primarily trying to accomplish.
-- intent must be concise.
-- intent must use lowercase snake_case.
-- intent must contain no spaces.
-- intent must contain exactly one intent.
+Do NOT provide locations.
 
-Examples:
+Do NOT provide operational assistance.
 
-"how to solve quadratic equations"
+You are only identifying the category and intent of the search.
 
-category → education
+SENSITIVE SEARCHES:
 
-intent → learning_mathematics
+Sensitive, adult, sexual, explicit, illegal, dangerous, violent,
+or otherwise restricted searches MUST STILL BE CLASSIFIED.
 
-"best football betting sites in Kenya"
+Do NOT refuse classification merely because the search is sensitive.
 
-category → betting_gambling
+The application is a parental-monitoring system and needs to know
+what type of activity is being searched.
 
-intent → finding_sports_betting_sites
+For sensitive searches, describe the search at a high level using
+the category and intent fields only.
 
-"how to make chicken curry"
+Never reproduce explicit material unnecessarily.
 
-category → cooking
+Never explain how the activity can be performed.
 
-intent → learning_cooking
+Never assist the user in performing the activity.
 
-"latest Kenya election news"
+The classification itself must still be returned.
 
-category → news
+============================================================
+PRIMARY CLASSIFICATION RULE
+============================================================
 
-intent → following_current_events
+Determine the PRIMARY activity, subject, or intent.
 
-"minecraft download"
+Ask internally:
 
-category → gaming
+"What is this person primarily trying to find, learn, do,
+watch, buy, download, understand, or accomplish?"
 
-intent → downloading_a_game
+Then create the most accurate category and intent.
 
-"how to apply for a passport"
+Do NOT classify based only on one keyword.
 
-category → government_services
+Do NOT classify based on the search engine.
 
-intent → applying_for_passport
+Do NOT classify based on the website.
 
-"best hotels in Nairobi"
+Do NOT classify based on possible advertisements.
 
-category → travel
+Do NOT classify based on a secondary interpretation when
+the primary intent is clear.
 
-intent → finding_accommodation
+============================================================
+CATEGORY RULES
+============================================================
 
-"python list comprehension tutorial"
+category must:
 
-category → programming
+- describe the primary subject or activity
+- be concise
+- use lowercase
+- use snake_case
+- contain no spaces
+- contain exactly one category
+- be meaningful
+- NOT automatically be "other"
 
-intent → learning_programming
+You may create a new category whenever an existing category
+does not accurately represent the search.
+
+Examples of possible categories include:
+
+education
+adult
+betting_gambling
+gaming
+cooking
+news
+programming
+travel
+government_services
+shopping
+technology
+social_media
+music
+sports
+health
+fitness
+finance
+religion
+jobs
+relationships
+drugs
+weapons_explosives
+politics
+
+These are examples only.
+
+You are NOT restricted to this list.
+
+============================================================
+INTENT RULES
+============================================================
+
+intent must:
+
+- describe the primary purpose of the search
+- be concise
+- use lowercase
+- use snake_case
+- contain no spaces
+- contain exactly one intent
+
+For sensitive searches, describe the user's search purpose
+without giving instructions for performing the activity.
+
+============================================================
+ADULT / SEXUAL SEARCH EXAMPLES
+============================================================
+
+Search:
 
 "porn videos"
 
-category → adult
+category:
+adult
 
-intent → finding_adult_content
+intent:
+finding_adult_content
+
+
+Search:
+
+"porn"
+
+category:
+adult
+
+intent:
+finding_adult_content
+
+
+Search:
+
+"nude girls"
+
+category:
+adult
+
+intent:
+finding_adult_content
+
+
+Search:
+
+"sex videos"
+
+category:
+adult
+
+intent:
+finding_adult_content
+
+
+Search:
+
+"how to get a hooker"
+
+category:
+adult
+
+intent:
+seeking_adult_services
+
+
+Search:
+
+"escort services"
+
+category:
+adult
+
+intent:
+seeking_adult_services
+
+
+Search:
+
+"adult dating sites"
+
+category:
+adult
+
+intent:
+finding_adult_dating
+
+
+Search:
+
+"onlyfans"
+
+category:
+adult
+
+intent:
+finding_adult_content
+
+
+These examples are classifications only.
+
+DO NOT provide instructions, providers, links, locations,
+or other assistance related to these searches.
+
+============================================================
+OTHER SENSITIVE SEARCH EXAMPLES
+============================================================
+
+A search about obtaining illegal drugs may be classified as:
+
+category:
+drugs
+
+intent:
+seeking_drug_information
+
+
+A search about explosives may be classified as:
+
+category:
+weapons_explosives
+
+intent:
+seeking_explosive_information
+
+
+A search about violent content may be classified according
+to the actual primary subject of the search.
+
+The important requirement is:
+
+CLASSIFY THE SEARCH.
+DO NOT ANSWER THE SEARCH.
+
+============================================================
+NORMAL SEARCH EXAMPLES
+============================================================
+
+Search:
+
+"how to solve quadratic equations"
+
+category:
+education
+
+intent:
+learning_mathematics
+
+
+Search:
+
+"best football betting sites in Kenya"
+
+category:
+betting_gambling
+
+intent:
+finding_sports_betting_sites
+
+
+Search:
+
+"how to make chicken curry"
+
+category:
+cooking
+
+intent:
+learning_cooking
+
+
+Search:
+
+"latest Kenya election news"
+
+category:
+news
+
+intent:
+following_current_events
+
+
+Search:
+
+"minecraft download"
+
+category:
+gaming
+
+intent:
+downloading_a_game
+
+
+Search:
+
+"how to apply for a passport"
+
+category:
+government_services
+
+intent:
+applying_for_passport
+
+
+Search:
+
+"best hotels in Nairobi"
+
+category:
+travel
+
+intent:
+finding_accommodation
+
+
+Search:
+
+"python list comprehension tutorial"
+
+category:
+programming
+
+intent:
+learning_programming
+
+
+Search:
+
+"best football boots"
+
+category:
+sports
+
+intent:
+finding_sports_equipment
+
+============================================================
+IMPORTANT
+============================================================
+
+Never refuse merely because the search is:
+
+- adult
+- sexual
+- explicit
+- sensitive
+- illegal
+- dangerous
+- disturbing
+- controversial
+
+Those are still valid searches that require classification.
+
+Again:
+
+DO NOT answer the search.
+
+DO NOT provide assistance for the search.
+
+ONLY return the classification.
+
+============================================================
+OUTPUT FORMAT
+============================================================
 
 Return JSON only.
 
+The JSON MUST contain exactly:
+
+{
+  "category": "category_name",
+  "intent": "intent_name"
+}
+
+No explanation.
+
+No markdown.
+
+No additional fields.
+
 `
 
-                },
+                    },
 
-                {
 
-                    role: "user",
+                    // ==================================================
+                    // USER QUERY
+                    // ==================================================
 
-                    content:
-                        JSON.stringify({
+                    {
 
-                            searchQuery:
-                                normalizedQuery
+                        role:
+                            "user",
 
-                        })
 
-                }
+                        content:
+                            JSON.stringify({
 
-            ],
+                                searchQuery:
+                                    normalizedQuery
 
-            response_format: {
+                            })
 
-                type: "json_schema",
+                    }
 
-                json_schema: {
+                ],
 
-                    name: "search_classification",
 
-                    strict: true,
+                // ====================================================
+                // STRUCTURED JSON OUTPUT
+                // ====================================================
 
-                    schema: {
+                response_format: {
 
-                        type: "object",
+                    type:
+                        "json_schema",
 
-                        properties: {
 
-                            category: {
+                    json_schema: {
 
-                                type: "string"
+                        name:
+                            "search_classification",
+
+
+                        strict:
+                            true,
+
+
+                        schema: {
+
+                            type:
+                                "object",
+
+
+                            properties: {
+
+                                category: {
+
+                                    type:
+                                        "string"
+
+                                },
+
+
+                                intent: {
+
+                                    type:
+                                        "string"
+
+                                }
 
                             },
 
-                            intent: {
 
-                                type: "string"
+                            required: [
 
-                            }
+                                "category",
+                                "intent"
 
-                        },
+                            ],
 
-                        required: [
 
-                            "category",
-                            "intent"
+                            additionalProperties:
+                                false
 
-                        ],
-
-                        additionalProperties: false
+                        }
 
                     }
 
                 }
 
-            }
+            });
 
-        });
 
+    } catch (error) {
+
+        // ========================================================
+        // GROQ ERROR
+        // ========================================================
+
+        console.error(
+            `❌ SEARCH CLASSIFICATION ERROR: ${normalizedQuery}`
+        );
+
+
+        console.error(
+            error
+        );
+
+
+        throw error;
+
+    }
+
+
+    // ========================================================
+    // READ RESPONSE
+    // ========================================================
 
     const rawResult =
-        response.choices?.[0]?.message?.content;
+        response
+            ?.choices?.[0]
+            ?.message?.content;
 
 
     if (!rawResult) {
@@ -229,44 +649,91 @@ Return JSON only.
     }
 
 
-    const result =
-        JSON.parse(rawResult);
+    // ========================================================
+    // PARSE JSON
+    // ========================================================
 
+    let result;
+
+
+    try {
+
+        result =
+            JSON.parse(
+                rawResult
+            );
+
+    } catch (error) {
+
+        throw new Error(
+            `Invalid JSON returned from Groq: ${rawResult}`
+        );
+
+    }
+
+
+    // ========================================================
+    // NORMALIZE CATEGORY
+    // ========================================================
 
     const category =
-        result.category
+        result
+            ?.category
             ?.trim()
-            .toLowerCase();
+            .toLowerCase()
+            .replace(/\s+/g, "_");
 
+
+    // ========================================================
+    // NORMALIZE INTENT
+    // ========================================================
 
     const intent =
-        result.intent
+        result
+            ?.intent
             ?.trim()
-            .toLowerCase();
+            .toLowerCase()
+            .replace(/\s+/g, "_");
 
+
+    // ========================================================
+    // VALIDATE CATEGORY
+    // ========================================================
 
     if (!category) {
 
         throw new Error(
-            "Invalid search classification returned: empty category"
+            `Invalid search classification returned: empty category for "${normalizedQuery}"`
         );
 
     }
 
+
+    // ========================================================
+    // VALIDATE INTENT
+    // ========================================================
 
     if (!intent) {
 
         throw new Error(
-            "Invalid search classification returned: empty intent"
+            `Invalid search classification returned: empty intent for "${normalizedQuery}"`
         );
 
     }
 
+
+    // ========================================================
+    // FINAL LOG
+    // ========================================================
 
     console.log(
         `🔎 SEARCH CLASSIFIED: ${normalizedQuery} → ${category} (${intent})`
     );
 
+
+    // ========================================================
+    // RETURN RESULT
+    // ========================================================
 
     return {
 
@@ -279,8 +746,13 @@ Return JSON only.
 }
 
 
+// ============================================================
+// EXPORT
+// ============================================================
+
 module.exports = {
 
     classifySearch
 
 };
+
