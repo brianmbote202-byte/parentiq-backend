@@ -3,9 +3,119 @@ const { db } = require("../firebase");
 const { classifyApp } = require("./AppClassifier");
 
 
+// ============================================================
+// CATEGORY VALIDATION
+// ============================================================
+//
+// Categories are intentionally OPEN-ENDED.
+//
+// We do NOT use a fixed category list.
+//
+// Examples of valid categories:
+//
+// navigation
+// transportation
+// music_streaming
+// video_streaming
+// cloud_storage
+// system
+// system_ui
+// system_settings
+// artificial_intelligence
+// system_configuration
+// system_toolkit
+// digital_wallet
+// password_manager
+// cybersecurity
+//
+// "pending" is reserved as the workflow state for apps that
+// have not yet been classified.
+//
+
+function validateCategory(category) {
+
+    if (
+        typeof category !== "string"
+    ) {
+        throw new Error(
+            "Category must be a string"
+        );
+    }
+
+    const normalized =
+        category
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "_")
+            .replace(/-+/g, "_")
+            .replace(/[^a-z0-9_]/g, "")
+            .replace(/_+/g, "_")
+            .replace(/^_+|_+$/g, "");
+
+    if (!normalized) {
+        throw new Error(
+            "Category cannot be empty"
+        );
+    }
+
+    // --------------------------------------------------------
+    // RESERVED WORKFLOW VALUE
+    // --------------------------------------------------------
+
+    if (normalized === "pending") {
+        throw new Error(
+            'Invalid category: "pending" is reserved for unclassified apps'
+        );
+    }
+
+    // --------------------------------------------------------
+    // MUST CONTAIN AT LEAST ONE LETTER
+    // --------------------------------------------------------
+
+    if (!/[a-z]/.test(normalized)) {
+        throw new Error(
+            `Invalid category: ${category}`
+        );
+    }
+
+    // --------------------------------------------------------
+    // MAXIMUM CATEGORY LENGTH
+    // --------------------------------------------------------
+
+    if (normalized.length > 80) {
+        throw new Error(
+            `Category is too long: ${normalized.length} characters`
+        );
+    }
+
+    // --------------------------------------------------------
+    // FINAL FORMAT CHECK
+    // --------------------------------------------------------
+
+    if (
+        !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(
+            normalized
+        )
+    ) {
+        throw new Error(
+            `Invalid category format: ${category}`
+        );
+    }
+
+    return normalized;
+}
+
+
+// ============================================================
+// CLASSIFY ONE PENDING APP
+// ============================================================
+
 async function classifyPendingApp(packageKey) {
+
     if (!packageKey) {
-        throw new Error("packageKey is required");
+        throw new Error(
+            "packageKey is required"
+        );
     }
 
     const ref = db
@@ -27,6 +137,7 @@ async function classifyPendingApp(packageKey) {
     );
 
     if (appData.category !== "pending") {
+
         console.log(
             `⏭️ SKIPPING: already classified as ${appData.category}`
         );
@@ -38,10 +149,35 @@ async function classifyPendingApp(packageKey) {
         };
     }
 
-    const category = await classifyApp(
+    // --------------------------------------------------------
+    // ASK AI FOR CATEGORY
+    // --------------------------------------------------------
+
+    const rawCategory = await classifyApp(
         appData.appName,
         appData.packageName
     );
+
+    console.log(
+        `🤖 RAW AI CATEGORY: ${rawCategory}`
+    );
+
+    // --------------------------------------------------------
+    // VALIDATE AI CATEGORY
+    // --------------------------------------------------------
+
+    const category =
+        validateCategory(
+            rawCategory
+        );
+
+    console.log(
+        `✅ CATEGORY VALIDATED: ${category}`
+    );
+
+    // --------------------------------------------------------
+    // WRITE ONLY VALIDATED CATEGORY
+    // --------------------------------------------------------
 
     await ref.update({
         category,
@@ -51,6 +187,10 @@ async function classifyPendingApp(packageKey) {
     console.log(
         `✅ FIREBASE CATEGORY UPDATED: ${appData.appName} → ${category}`
     );
+
+    // --------------------------------------------------------
+    // PROPAGATE VALIDATED CATEGORY
+    // --------------------------------------------------------
 
     await propagateCategoryToInstalledApps(
         packageKey,
@@ -65,25 +205,29 @@ async function classifyPendingApp(packageKey) {
 }
 
 
-/**
- * Manually correct the category of an already-classified app.
- *
- * This updates:
- *
- * app_categories/{packageKey}
- *
- * and then propagates the corrected category to every
- * matching installed_apps record across all children.
- */
+// ============================================================
+// MANUALLY CORRECT APP CATEGORY
+// ============================================================
+
 async function correctAppCategory(
     packageKey,
     category
 ) {
+
     if (!packageKey || !category) {
         throw new Error(
             "packageKey and category are required"
         );
     }
+
+    // --------------------------------------------------------
+    // VALIDATE BEFORE FIREBASE WRITE
+    // --------------------------------------------------------
+
+    const validatedCategory =
+        validateCategory(
+            category
+        );
 
     const ref = db
         .ref("app_categories")
@@ -103,21 +247,22 @@ async function correctAppCategory(
         `🛠️ CORRECTING APP: ${appData.appName} (${appData.packageName})`
     );
 
-    const oldCategory = appData.category;
+    const oldCategory =
+        appData.category;
 
     await ref.update({
-        category,
+        category: validatedCategory,
         updatedAt: Date.now()
     });
 
     console.log(
-        `✅ FIREBASE CATEGORY CORRECTED: ${appData.appName} → ${category}`
+        `✅ FIREBASE CATEGORY CORRECTED: ${appData.appName} → ${validatedCategory}`
     );
 
     const propagationResult =
         await propagateCategoryToInstalledApps(
             packageKey,
-            category
+            validatedCategory
         );
 
     return {
@@ -125,25 +270,35 @@ async function correctAppCategory(
         appName: appData.appName || "",
         packageName: appData.packageName || "",
         oldCategory,
-        newCategory: category,
+        newCategory: validatedCategory,
         propagated: propagationResult.updated
     };
 }
 
 
-/**
- * Propagate a category from the central app_categories
- * record to every matching installed_apps record.
- */
+// ============================================================
+// PROPAGATE CATEGORY TO INSTALLED APPS
+// ============================================================
+
 async function propagateCategoryToInstalledApps(
     packageKey,
     category
 ) {
+
     if (!packageKey || !category) {
         throw new Error(
             "packageKey and category are required"
         );
     }
+
+    // --------------------------------------------------------
+    // VALIDATE BEFORE PROPAGATION WRITE
+    // --------------------------------------------------------
+
+    const validatedCategory =
+        validateCategory(
+            category
+        );
 
     const installedAppsRef =
         db.ref("installed_apps");
@@ -152,6 +307,7 @@ async function propagateCategoryToInstalledApps(
         await installedAppsRef.once("value");
 
     if (!snapshot.exists()) {
+
         console.log(
             "ℹ️ No installed_apps data found."
         );
@@ -161,36 +317,48 @@ async function propagateCategoryToInstalledApps(
         };
     }
 
-    const children = snapshot.val() || {};
+    const children =
+        snapshot.val() || {};
 
     const updates = {};
+
     let updatedCount = 0;
 
-    for (const [childId, childApps] of Object.entries(children)) {
+    for (
+        const [childId, childApps]
+        of Object.entries(children)
+    ) {
 
-        if (!childApps || typeof childApps !== "object") {
+        if (
+            !childApps ||
+            typeof childApps !== "object"
+        ) {
             continue;
         }
 
         const appRef =
             childApps[packageKey];
 
-        if (!appRef || typeof appRef !== "object") {
+        if (
+            !appRef ||
+            typeof appRef !== "object"
+        ) {
             continue;
         }
 
         updates[
             `installed_apps/${childId}/${packageKey}/category`
-        ] = category;
+        ] = validatedCategory;
 
         updatedCount++;
 
         console.log(
-            `🔄 CATEGORY PROPAGATION: ${childId}/${packageKey} → ${category}`
+            `🔄 CATEGORY PROPAGATION: ${childId}/${packageKey} → ${validatedCategory}`
         );
     }
 
     if (updatedCount === 0) {
+
         console.log(
             `ℹ️ No installed app records found for ${packageKey}`
         );
@@ -203,7 +371,7 @@ async function propagateCategoryToInstalledApps(
     await db.ref().update(updates);
 
     console.log(
-        `✅ PROPAGATED ${category} TO ${updatedCount} INSTALLED APP RECORD(S)`
+        `✅ PROPAGATED ${validatedCategory} TO ${updatedCount} INSTALLED APP RECORD(S)`
     );
 
     return {
@@ -212,17 +380,42 @@ async function propagateCategoryToInstalledApps(
 }
 
 
-/**
- * Process pending apps in batches.
- */
-async function processPendingApps(limit = 1) {
+// ============================================================
+// PROCESS PENDING APPS
+// ============================================================
+
+async function processPendingApps(
+    limit = 1
+) {
+
+    // --------------------------------------------------------
+    // QUERY FIREBASE DIRECTLY FOR PENDING APPS
+    // --------------------------------------------------------
+    //
+    // Firebase returns ONLY records where:
+    //
+    // category === "pending"
+    //
+    // This avoids downloading the complete app_categories tree.
+    //
+    // limit keeps OpenRouter Free usage controlled.
+    //
+
     const snapshot = await db
         .ref("app_categories")
+        .orderByChild("category")
+        .equalTo("pending")
+        .limitToFirst(limit)
         .once("value");
 
+    // --------------------------------------------------------
+    // NO PENDING APPS
+    // --------------------------------------------------------
+
     if (!snapshot.exists()) {
+
         console.log(
-            "ℹ️ No app_categories data found."
+            "📋 NO PENDING APPS FOUND"
         );
 
         return {
@@ -231,33 +424,46 @@ async function processPendingApps(limit = 1) {
         };
     }
 
-    const apps = snapshot.val() || {};
+    // --------------------------------------------------------
+    // CONVERT FIREBASE RESULT
+    // --------------------------------------------------------
 
-    const pendingApps = Object.entries(apps)
-        .filter(([_, appData]) =>
-            appData &&
-            appData.category === "pending"
-        )
-        .slice(0, limit);
+    const apps =
+        snapshot.val() || {};
+
+    const pendingApps =
+        Object.entries(apps);
 
     console.log(
         `📋 PENDING APPS FOUND: ${pendingApps.length}`
     );
 
+    // --------------------------------------------------------
+    // PROCESS RESULTS
+    // --------------------------------------------------------
+
     let processed = 0;
     let failed = 0;
 
-    for (const [packageKey, appData] of pendingApps) {
+    for (
+        const [packageKey, appData]
+        of pendingApps
+    ) {
+
         try {
+
             console.log(
                 `🚀 PROCESSING PENDING APP: ${appData.appName} (${appData.packageName})`
             );
 
-            await classifyPendingApp(packageKey);
+            await classifyPendingApp(
+                packageKey
+            );
 
             processed++;
 
         } catch (error) {
+
             failed++;
 
             console.error(
@@ -266,6 +472,10 @@ async function processPendingApps(limit = 1) {
             );
         }
     }
+
+    // --------------------------------------------------------
+    // SUMMARY
+    // --------------------------------------------------------
 
     console.log(
         `📊 PENDING PROCESS COMPLETE: ${processed} processed, ${failed} failed`
@@ -278,10 +488,15 @@ async function processPendingApps(limit = 1) {
 }
 
 
+// ============================================================
+// EXPORTS
+// ============================================================
+
 module.exports = {
     classifyPendingApp,
     correctAppCategory,
     propagateCategoryToInstalledApps,
-    processPendingApps
+    processPendingApps,
+    validateCategory
 };
 
