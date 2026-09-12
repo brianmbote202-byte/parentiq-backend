@@ -1,52 +1,108 @@
+
 const { processPendingApps } = require("./AppCategoryProcessor");
+
+// ============================================================
+// APP CLASSIFICATION WORKER STATE
+// ============================================================
 
 let isProcessing = false;
 
-const PROCESS_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+// ============================================================
+// WORKER SETTINGS
+// ============================================================
+
+// Check Firebase every 30 seconds.
+const PROCESS_INTERVAL_MS = 30 * 1000;
+
+// Classify one app per cycle.
+// This keeps OpenRouter Free usage controlled.
 const BATCH_SIZE = 1;
 
+// ============================================================
+// RUN ONE CLASSIFICATION CYCLE
+// ============================================================
+
 async function runClassificationCycle() {
+
+    // Prevent overlapping classification cycles.
     if (isProcessing) {
-        console.log("⏳ APP CLASSIFICATION WORKER: Previous cycle still running. Skipping.");
+
+        console.log(
+            "⏳ APP CLASSIFICATION WORKER: Previous cycle still running. Skipping."
+        );
+
         return;
     }
 
     isProcessing = true;
 
     try {
-        console.log("🤖 APP CLASSIFICATION WORKER: Checking for pending apps...");
 
-        const result = await processPendingApps(BATCH_SIZE);
+        console.log(
+            "🤖 APP CLASSIFICATION WORKER: Checking for pending apps..."
+        );
+
+        const result =
+            await processPendingApps(
+                BATCH_SIZE
+            );
 
         console.log(
             `📊 APP CLASSIFICATION WORKER: ${result.processed} processed, ${result.failed} failed`
         );
 
     } catch (error) {
+
         console.error(
             "❌ APP CLASSIFICATION WORKER FAILED:",
             error
         );
 
     } finally {
+
         isProcessing = false;
     }
 }
 
+// ============================================================
+// START AUTOMATIC WORKER
+// ============================================================
+
 function startAppClassificationWorker() {
+
     console.log(
         "🚀 APP CLASSIFICATION WORKER STARTED"
     );
 
-    // Check once when the backend starts.
+    console.log(
+        "⏱️ APP CLASSIFICATION CHECK INTERVAL: 30 seconds"
+    );
+
+    console.log(
+        `📦 MAX APPS PER CYCLE: ${BATCH_SIZE}`
+    );
+
+    // ========================================================
+    // INITIAL CHECK
+    // ========================================================
+
+    // Check immediately when the backend starts.
     runClassificationCycle();
 
-    // Then check every 5 minutes.
+    // ========================================================
+    // CONTINUOUS AUTOMATIC CHECK
+    // ========================================================
+
+    // Continue checking automatically.
     setInterval(
         runClassificationCycle,
         PROCESS_INTERVAL_MS
     );
 }
+
+// ============================================================
+// EXPORT
+// ============================================================
 
 module.exports = {
     startAppClassificationWorker

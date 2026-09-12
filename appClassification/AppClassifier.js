@@ -1,116 +1,515 @@
 
-const OpenAI = require("openai");
+require("dotenv").config();
 
-const client = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-});
 
-const ALLOWED_CATEGORIES = [
-    "social_media",
-    "messaging",
-    "gaming",
-    "browser",
-    "productivity",
-    "education",
-    "finance",
-    "streaming",
-    "shopping",
-    "betting_gambling",
-    "health",
-    "other"
-];
 
-async function classifyApp(appName, packageName) {
-    if (!appName || !packageName) {
-        throw new Error("appName and packageName are required");
+// ============================================================
+// NORMALIZE CATEGORY
+// ============================================================
+
+function normalizeCategory(value) {
+
+    if (!value || typeof value !== "string") {
+        return "";
     }
 
-    const response = await client.responses.create({
-        model: "gpt-5.6-luna",
-        input: [
+    return value
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "_")
+        .replace(/[^a-z0-9_]/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+}
+
+
+
+// ============================================================
+// EXTRACT CATEGORY FROM MODEL RESPONSE
+// ============================================================
+
+function extractCategory(output) {
+
+    if (!output || typeof output !== "string") {
+        return "";
+    }
+
+    const text = output.trim();
+
+
+    // --------------------------------------------------------
+    // 1. CLEAN JSON
+    // --------------------------------------------------------
+
+    try {
+
+        const parsed = JSON.parse(text);
+
+        if (
+            parsed &&
+            typeof parsed.category === "string"
+        ) {
+
+            return normalizeCategory(
+                parsed.category
+            );
+        }
+
+    } catch (_) {
+        // Continue checking other formats.
+    }
+
+
+
+    // --------------------------------------------------------
+    // 2. JSON EMBEDDED INSIDE OTHER TEXT
+    // --------------------------------------------------------
+
+    const jsonMatch =
+        text.match(
+            /\{[\s\S]*?"category"\s*:\s*"([^"]+)"[\s\S]*?\}/i
+        );
+
+    if (
+        jsonMatch &&
+        jsonMatch[1]
+    ) {
+
+        const category =
+            normalizeCategory(
+                jsonMatch[1]
+            );
+
+        if (category) {
+            return category;
+        }
+    }
+
+
+
+    // --------------------------------------------------------
+    // 3. EXPLICIT CATEGORY DECLARATION
+    // --------------------------------------------------------
+
+    const categoryMatch =
+        text.match(
+            /^\s*category\s*[:=]\s*["'`]?(.*?)["'`]?\s*$/im
+        );
+
+    if (
+        categoryMatch &&
+        categoryMatch[1]
+    ) {
+
+        const category =
+            normalizeCategory(
+                categoryMatch[1]
+            );
+
+        if (category) {
+            return category;
+        }
+    }
+
+
+
+    // --------------------------------------------------------
+    // 4. EXPLICIT FINAL CATEGORY SENTENCE
+    // --------------------------------------------------------
+
+    const finalCategoryMatch =
+        text.match(
+            /\b(?:appropriate|primary|correct|best|final)\s+category\s+(?:is|would\s+be)\s+["'`]?([a-zA-Z0-9][a-zA-Z0-9 _-]*)["'`]?[.!]?/i
+        );
+
+    if (
+        finalCategoryMatch &&
+        finalCategoryMatch[1]
+    ) {
+
+        const category =
+            normalizeCategory(
+                finalCategoryMatch[1]
+            );
+
+        if (category) {
+            return category;
+        }
+    }
+
+
+
+    // --------------------------------------------------------
+    // 5. CLEAN SINGLE CATEGORY
+    //
+    // Example:
+    //
+    // artificial_intelligence
+    //
+    // This is the format we explicitly request.
+    // --------------------------------------------------------
+
+    if (
+        !text.includes("\n") &&
+        !text.includes(" ") &&
+        /^[a-zA-Z0-9_]+$/.test(text)
+    ) {
+
+        const category =
+            normalizeCategory(text);
+
+        if (category) {
+            return category;
+        }
+    }
+
+
+
+    return "";
+}
+
+
+
+// ============================================================
+// OPENROUTER REQUEST
+// ============================================================
+
+async function requestClassification(
+    appName,
+    packageName
+) {
+
+    const prompt = `
+You classify Android applications by their PRIMARY PURPOSE.
+
+You are NOT restricted to a predefined category list.
+
+Create the most accurate reusable category.
+
+CATEGORY RULES:
+
+- Use the application's primary function.
+- Create a new category when necessary.
+- Never force an inaccurate category.
+- Categories must be concise and reusable.
+- Use lowercase snake_case.
+- Do not use spaces.
+- Do not use the application name as the category.
+- Do not create a category unnecessarily specific to one application.
+
+Examples:
+
+YouTube = video_streaming
+WhatsApp = messaging
+Facebook = social_media
+Instagram = social_media
+Chrome = browser
+Firefox = browser
+Google Maps = navigation
+Uber = transportation
+Spotify = music_streaming
+Netflix = video_streaming
+Google Drive = cloud_storage
+Microsoft Word = productivity
+Khan Academy = education
+M-PESA = finance
+Amazon = shopping
+Chess = gaming
+Fitbit = health_fitness
+Grok = artificial_intelligence
+
+SYSTEM APPLICATIONS:
+
+If the application is primarily a system component, framework,
+provider, launcher, settings component, update service,
+background service, installer, device-management component,
+or technical support package, classify according to its
+technical role.
+
+Examples:
+
+Android System = system
+System UI = system_ui
+Package Installer = system_installer
+Settings = system_settings
+
+IMPORTANT:
+
+Return ONLY the category.
+
+Do NOT explain your answer.
+Do NOT provide reasoning.
+Do NOT provide a thinking process.
+Do NOT use markdown.
+Do NOT return JSON.
+Do NOT include punctuation.
+
+Example output:
+
+video_streaming
+`;
+
+
+
+    const response =
+        await fetch(
+            "https://openrouter.ai/api/v1/chat/completions",
             {
-                role: "system",
-                content: `
-You are an Android application classification service.
+                method: "POST",
 
-Classify the application into exactly ONE of these categories:
+                headers: {
 
-${ALLOWED_CATEGORIES.join(", ")}
+                    "Authorization":
+                        `Bearer ${process.env.OPENROUTER_API_KEY}`,
 
-Rules:
-- Classify based primarily on the application's known purpose.
-- Use both application name and package name as signals.
-- Do not invent categories.
-- System utilities, settings, contacts, launchers, device tools and unclear
-  applications should normally be classified as "other".
-- Background services, app managers, installers, update components,
-  companion services, provider packages and system components should be
-  classified according to their technical role, not the consumer product
-  or brand they belong to.
-- If a package is primarily a background/system component rather than a
-  user-facing application, classify it as "other".
-- Social networking applications → social_media.
-- Chat and direct messaging applications → messaging.
-- Games → gaming.
-- Web browsers → browser.
-- Video, music and movie streaming services → streaming.
-- Gambling, casino, sportsbook and betting applications → betting_gambling.
-- Banking, payment and financial applications → finance.
-- Health, fitness and medical applications → health.
-- Shopping and marketplace applications → shopping.
-- If the purpose cannot be determined reliably → other.
+                    "Content-Type":
+                        "application/json",
 
+                    "HTTP-Referer":
+                        "https://parentiq.app",
 
+                    "X-Title":
+                        "ParentIQ App Classification"
+                },
 
+                body: JSON.stringify({
 
-Return JSON only.
-                `
-            },
-            {
-                role: "user",
-                content: JSON.stringify({
-                    appName,
-                    packageName
+                    model:
+                        "openrouter/free",
+
+                    messages: [
+
+                        {
+                            role: "system",
+                            content: prompt
+                        },
+
+                        {
+                            role: "user",
+                            content:
+                                `App name: ${appName}\nPackage name: ${packageName}`
+                        }
+
+                    ],
+
+                    temperature: 0,
+
+                    max_tokens: 100,
+
+                    reasoning: {
+                        effort: "none"
+                    }
+
                 })
             }
-        ],
-        text: {
-            format: {
-                type: "json_schema",
-                name: "app_classification",
-                strict: true,
-                schema: {
-                    type: "object",
-                    properties: {
-                        category: {
-                            type: "string",
-                            enum: ALLOWED_CATEGORIES
-                        }
-                    },
-                    required: ["category"],
-                    additionalProperties: false
-                }
-            }
-        }
-    });
+        );
 
-    const result = JSON.parse(response.output_text);
 
-    if (!ALLOWED_CATEGORIES.includes(result.category)) {
+
+    // --------------------------------------------------------
+    // READ RESPONSE
+    // --------------------------------------------------------
+
+    const data =
+        await response.json();
+
+
+
+    // --------------------------------------------------------
+    // API ERROR
+    // --------------------------------------------------------
+
+    if (!response.ok) {
+
         throw new Error(
-            `Invalid classification returned: ${result.category}`
+            `OpenRouter API error ${response.status}: ${
+                data?.error?.message ||
+                JSON.stringify(data)
+            }`
         );
     }
 
+
+
+    // --------------------------------------------------------
+    // GET MESSAGE
+    // --------------------------------------------------------
+
+    const message =
+        data?.choices?.[0]?.message;
+
+
+
+    const output =
+        message?.content;
+
+
+
+    // --------------------------------------------------------
+    // MODEL RETURNED CONTENT
+    // --------------------------------------------------------
+
+    if (
+        typeof output === "string" &&
+        output.trim()
+    ) {
+
+        console.log(
+            `🔎 OPENROUTER RAW CLASSIFICATION: ${output}`
+        );
+
+        return output.trim();
+    }
+
+
+
+    // --------------------------------------------------------
+    // MODEL RETURNED NO CONTENT
+    //
+    // This can happen when a free reasoning model consumes
+    // its completion budget before producing the answer.
+    // --------------------------------------------------------
+
     console.log(
-        `🤖 APP CLASSIFIED: ${appName} (${packageName}) → ${result.category}`
+        "⚠️ OPENROUTER RESPONSE WITHOUT CONTENT:"
     );
 
-    return result.category;
+    console.log(
+        JSON.stringify(
+            data,
+            null,
+            2
+        )
+    );
+
+
+
+    // --------------------------------------------------------
+    // CHECK WHETHER THE MODEL PUT THE CATEGORY IN REASONING
+    //
+    // We only use this as a last-resort extraction if the
+    // reasoning itself contains a clear classification.
+    // --------------------------------------------------------
+
+    const reasoning =
+        message?.reasoning;
+
+
+
+    if (
+        typeof reasoning === "string" &&
+        reasoning.trim()
+    ) {
+
+        const reasoningCategory =
+            extractCategory(
+                reasoning
+            );
+
+        if (reasoningCategory) {
+
+            console.log(
+                `⚠️ CATEGORY RECOVERED FROM MODEL RESPONSE: ${reasoningCategory}`
+            );
+
+            return reasoningCategory;
+        }
+    }
+
+
+
+    throw new Error(
+        "OpenRouter returned no usable content"
+    );
 }
 
+
+
+// ============================================================
+// MAIN CLASSIFIER
+// ============================================================
+
+async function classifyApp(
+    appName,
+    packageName
+) {
+
+    if (
+        !appName ||
+        !packageName
+    ) {
+
+        throw new Error(
+            "appName and packageName are required"
+        );
+    }
+
+
+
+    if (
+        !process.env.OPENROUTER_API_KEY
+    ) {
+
+        throw new Error(
+            "OPENROUTER_API_KEY is not configured"
+        );
+    }
+
+
+
+    try {
+
+        const output =
+            await requestClassification(
+                appName,
+                packageName
+            );
+
+
+
+        const category =
+            extractCategory(
+                output
+            );
+
+
+
+        if (!category) {
+
+            throw new Error(
+                `OpenRouter returned no usable category: ${output}`
+            );
+        }
+
+
+
+        console.log(
+            `🤖 APP CLASSIFIED: ${appName} (${packageName}) → ${category}`
+        );
+
+
+
+        return category;
+
+    } catch (error) {
+
+        console.error(
+            `❌ OPENROUTER APP CLASSIFICATION FAILED: ${appName} (${packageName})`
+        );
+
+        console.error(error);
+
+        throw error;
+    }
+}
+
+
+
+// ============================================================
+// EXPORT
+// ============================================================
+
 module.exports = {
-    classifyApp,
-    ALLOWED_CATEGORIES
+    classifyApp
 };
 
