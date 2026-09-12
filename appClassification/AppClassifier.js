@@ -1,6 +1,4 @@
-
 require("dotenv").config();
-
 
 
 // ============================================================
@@ -23,6 +21,69 @@ function normalizeCategory(value) {
 }
 
 
+// ============================================================
+// VALIDATE CATEGORY
+// ============================================================
+
+function validateCategory(category) {
+
+    const normalized =
+        normalizeCategory(category);
+
+    if (!normalized) {
+        throw new Error(
+            "AI returned an empty category"
+        );
+    }
+
+    // --------------------------------------------------------
+    // Category must be lowercase snake_case
+    // --------------------------------------------------------
+
+    if (
+        !/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(
+            normalized
+        )
+    ) {
+        throw new Error(
+            `Invalid category format: ${category}`
+        );
+    }
+
+    // --------------------------------------------------------
+    // Prevent excessively long AI-generated categories
+    // --------------------------------------------------------
+
+    if (normalized.length > 60) {
+        throw new Error(
+            `Category is too long: ${normalized}`
+        );
+    }
+
+    // --------------------------------------------------------
+    // Prevent the model from returning an entire sentence
+    // --------------------------------------------------------
+
+    const words =
+        normalized.split("_");
+
+    if (words.length > 6) {
+        throw new Error(
+            `Category contains too many words: ${normalized}`
+        );
+    }
+
+    console.log(
+        `🤖 RAW AI CATEGORY: ${category}`
+    );
+
+    console.log(
+        `✅ CATEGORY VALIDATED: ${normalized}`
+    );
+
+    return normalized;
+}
+
 
 // ============================================================
 // EXTRACT CATEGORY FROM MODEL RESPONSE
@@ -34,7 +95,8 @@ function extractCategory(output) {
         return "";
     }
 
-    const text = output.trim();
+    const text =
+        output.trim();
 
 
     // --------------------------------------------------------
@@ -43,7 +105,8 @@ function extractCategory(output) {
 
     try {
 
-        const parsed = JSON.parse(text);
+        const parsed =
+            JSON.parse(text);
 
         if (
             parsed &&
@@ -56,9 +119,10 @@ function extractCategory(output) {
         }
 
     } catch (_) {
-        // Continue checking other formats.
-    }
 
+        // Continue checking other formats.
+
+    }
 
 
     // --------------------------------------------------------
@@ -86,9 +150,12 @@ function extractCategory(output) {
     }
 
 
-
     // --------------------------------------------------------
     // 3. EXPLICIT CATEGORY DECLARATION
+    //
+    // Example:
+    //
+    // category: social_media
     // --------------------------------------------------------
 
     const categoryMatch =
@@ -112,9 +179,12 @@ function extractCategory(output) {
     }
 
 
-
     // --------------------------------------------------------
     // 4. EXPLICIT FINAL CATEGORY SENTENCE
+    //
+    // Example:
+    //
+    // The appropriate category is social_media.
     // --------------------------------------------------------
 
     const finalCategoryMatch =
@@ -138,7 +208,6 @@ function extractCategory(output) {
     }
 
 
-
     // --------------------------------------------------------
     // 5. CLEAN SINGLE CATEGORY
     //
@@ -146,7 +215,7 @@ function extractCategory(output) {
     //
     // artificial_intelligence
     //
-    // This is the format we explicitly request.
+    // This is the format explicitly requested.
     // --------------------------------------------------------
 
     if (
@@ -164,10 +233,8 @@ function extractCategory(output) {
     }
 
 
-
     return "";
 }
-
 
 
 // ============================================================
@@ -250,7 +317,6 @@ video_streaming
 `;
 
 
-
     const response =
         await fetch(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -258,7 +324,6 @@ video_streaming
                 method: "POST",
 
                 headers: {
-
                     "Authorization":
                         `Bearer ${process.env.OPENROUTER_API_KEY}`,
 
@@ -294,16 +359,26 @@ video_streaming
 
                     temperature: 0,
 
-                    max_tokens: 100,
+                    max_tokens: 100
 
-                    reasoning: {
-                        effort: "none"
-                    }
-
+                    // IMPORTANT:
+                    // Do NOT set reasoning here.
+                    //
+                    // openrouter/free may select a model
+                    // that requires reasoning.
+                    //
+                    // Setting:
+                    //
+                    // reasoning: { effort: "none" }
+                    //
+                    // can cause:
+                    //
+                    // HTTP 400:
+                    // "Reasoning is mandatory for this endpoint
+                    // and cannot be disabled."
                 })
             }
         );
-
 
 
     // --------------------------------------------------------
@@ -312,7 +387,6 @@ video_streaming
 
     const data =
         await response.json();
-
 
 
     // --------------------------------------------------------
@@ -330,7 +404,6 @@ video_streaming
     }
 
 
-
     // --------------------------------------------------------
     // GET MESSAGE
     // --------------------------------------------------------
@@ -339,10 +412,8 @@ video_streaming
         data?.choices?.[0]?.message;
 
 
-
     const output =
         message?.content;
-
 
 
     // --------------------------------------------------------
@@ -362,12 +433,8 @@ video_streaming
     }
 
 
-
     // --------------------------------------------------------
     // MODEL RETURNED NO CONTENT
-    //
-    // This can happen when a free reasoning model consumes
-    // its completion budget before producing the answer.
     // --------------------------------------------------------
 
     console.log(
@@ -383,17 +450,15 @@ video_streaming
     );
 
 
-
     // --------------------------------------------------------
-    // CHECK WHETHER THE MODEL PUT THE CATEGORY IN REASONING
+    // CHECK WHETHER MODEL PUT CATEGORY IN REASONING
     //
-    // We only use this as a last-resort extraction if the
-    // reasoning itself contains a clear classification.
+    // This is only a fallback.
+    // We do NOT disable reasoning.
     // --------------------------------------------------------
 
     const reasoning =
         message?.reasoning;
-
 
 
     if (
@@ -417,12 +482,10 @@ video_streaming
     }
 
 
-
     throw new Error(
         "OpenRouter returned no usable content"
     );
 }
-
 
 
 // ============================================================
@@ -445,7 +508,6 @@ async function classifyApp(
     }
 
 
-
     if (
         !process.env.OPENROUTER_API_KEY
     ) {
@@ -454,7 +516,6 @@ async function classifyApp(
             "OPENROUTER_API_KEY is not configured"
         );
     }
-
 
 
     try {
@@ -466,15 +527,13 @@ async function classifyApp(
             );
 
 
-
-        const category =
+        const rawCategory =
             extractCategory(
                 output
             );
 
 
-
-        if (!category) {
+        if (!rawCategory) {
 
             throw new Error(
                 `OpenRouter returned no usable category: ${output}`
@@ -482,11 +541,19 @@ async function classifyApp(
         }
 
 
+        // ----------------------------------------------------
+        // VALIDATE BEFORE ANY FIREBASE WRITE
+        // ----------------------------------------------------
+
+        const category =
+            validateCategory(
+                rawCategory
+            );
+
 
         console.log(
             `🤖 APP CLASSIFIED: ${appName} (${packageName}) → ${category}`
         );
-
 
 
         return category;
@@ -504,7 +571,6 @@ async function classifyApp(
 }
 
 
-
 // ============================================================
 // EXPORT
 // ============================================================
@@ -512,4 +578,3 @@ async function classifyApp(
 module.exports = {
     classifyApp
 };
-
