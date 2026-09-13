@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 
+
 // ============================================================
 // NORMALIZE CATEGORY
 // ============================================================
@@ -8,17 +9,27 @@ require("dotenv").config();
 function normalizeCategory(value) {
 
     if (!value || typeof value !== "string") {
+
         return "";
+
     }
 
     return value
+
         .trim()
+
         .toLowerCase()
+
         .replace(/\s+/g, "_")
+
         .replace(/[^a-z0-9_]/g, "_")
+
         .replace(/_+/g, "_")
+
         .replace(/^_+|_+$/g, "");
+
 }
+
 
 
 // ============================================================
@@ -39,7 +50,10 @@ function validateCategory(category) {
     }
 
     // --------------------------------------------------------
-    // Category must be lowercase snake_case
+    // Category must be lowercase snake_case.
+    //
+    // There is intentionally NO predefined category list.
+    // Any valid descriptive category is accepted.
     // --------------------------------------------------------
 
     if (
@@ -55,7 +69,7 @@ function validateCategory(category) {
     }
 
     // --------------------------------------------------------
-    // Prevent excessively long AI-generated categories
+    // Prevent excessively long AI-generated categories.
     // --------------------------------------------------------
 
     if (normalized.length > 60) {
@@ -67,7 +81,8 @@ function validateCategory(category) {
     }
 
     // --------------------------------------------------------
-    // Prevent the model from returning an entire sentence
+    // Prevent the model from returning an entire sentence.
+    // This is a format safeguard, NOT a category whitelist.
     // --------------------------------------------------------
 
     const words =
@@ -90,7 +105,9 @@ function validateCategory(category) {
     );
 
     return normalized;
+
 }
+
 
 
 // ============================================================
@@ -100,7 +117,9 @@ function validateCategory(category) {
 function extractCategory(output) {
 
     if (!output || typeof output !== "string") {
+
         return "";
+
     }
 
     const text =
@@ -108,6 +127,9 @@ function extractCategory(output) {
 
     // --------------------------------------------------------
     // 1. CLEAN JSON
+    //
+    // Example:
+    // {"category":"wearable_device_management"}
     // --------------------------------------------------------
 
     try {
@@ -132,6 +154,8 @@ function extractCategory(output) {
 
     }
 
+
+
     // --------------------------------------------------------
     // 2. JSON EMBEDDED INSIDE OTHER TEXT
     // --------------------------------------------------------
@@ -152,22 +176,27 @@ function extractCategory(output) {
             );
 
         if (category) {
+
             return category;
+
         }
 
     }
 
+
+
     // --------------------------------------------------------
     // 3. EXPLICIT CATEGORY DECLARATION
     //
-    // Example:
+    // Examples:
     //
     // category: social_media
+    // category = wearable_device_management
     // --------------------------------------------------------
 
     const categoryMatch =
         text.match(
-            /^\s*category\s*[:=]\s*["'`]?(.*?)["'`]?\s*$/im
+            /^\s*category\s*[:=]\s*["'`]?(.+?)["'`]?\s*$/im
         );
 
     if (
@@ -181,17 +210,22 @@ function extractCategory(output) {
             );
 
         if (category) {
+
             return category;
+
         }
 
     }
 
+
+
     // --------------------------------------------------------
     // 4. EXPLICIT FINAL CATEGORY SENTENCE
     //
-    // Example:
+    // Examples:
     //
     // The appropriate category is social_media.
+    // The primary category would be wearable_device_management.
     // --------------------------------------------------------
 
     const finalCategoryMatch =
@@ -210,36 +244,50 @@ function extractCategory(output) {
             );
 
         if (category) {
+
             return category;
+
         }
 
     }
+
+
 
     // --------------------------------------------------------
     // 5. CLEAN SINGLE CATEGORY
     //
     // Example:
     //
-    // artificial_intelligence
+    // wearable_device_management
     // --------------------------------------------------------
 
     if (
+
         !text.includes("\n") &&
+
         !text.includes(" ") &&
+
         /^[a-zA-Z0-9_]+$/.test(text)
+
     ) {
 
         const category =
             normalizeCategory(text);
 
         if (category) {
+
             return category;
+
         }
 
     }
 
+
+
     return "";
+
 }
+
 
 
 // ============================================================
@@ -247,8 +295,11 @@ function extractCategory(output) {
 // ============================================================
 
 async function requestClassification(
+
     appName,
+
     packageName
+
 ) {
 
     const prompt = `
@@ -257,7 +308,10 @@ You classify Android applications by their PRIMARY PURPOSE.
 
 You are NOT restricted to a predefined category list.
 
-Create the most accurate reusable category.
+Create the most accurate reusable category for each application.
+
+You may create a new category whenever the application does not fit
+an existing general category.
 
 CATEGORY RULES:
 
@@ -267,29 +321,51 @@ CATEGORY RULES:
 - Categories must be concise and reusable.
 - Use lowercase snake_case.
 - Do not use spaces.
+- Do not use punctuation.
 - Do not use the application name as the category.
 - Do not create a category unnecessarily specific to one application.
+- Use a maximum of 6 words.
+- Do not return "other" unless the application genuinely cannot be classified.
 
-Examples:
+EXAMPLES:
 
 YouTube = video_streaming
+
 WhatsApp = messaging
+
 Facebook = social_media
+
 Instagram = social_media
+
 Chrome = browser
+
 Firefox = browser
+
 Google Maps = navigation
+
 Uber = transportation
+
 Spotify = music_streaming
+
 Netflix = video_streaming
+
 Google Drive = cloud_storage
+
 Microsoft Word = productivity
+
 Khan Academy = education
+
 M-PESA = finance
+
 Amazon = shopping
+
 Chess = gaming
+
 Fitbit = health_fitness
+
 Grok = artificial_intelligence
+
+Galaxy Wearable = wearable_device_management
 
 SYSTEM APPLICATIONS:
 
@@ -302,8 +378,11 @@ technical role.
 Examples:
 
 Android System = system
+
 System UI = system_ui
+
 Package Installer = system_installer
+
 Settings = system_settings
 
 IMPORTANT:
@@ -311,10 +390,15 @@ IMPORTANT:
 Return ONLY the category.
 
 Do NOT explain your answer.
+
 Do NOT provide reasoning.
+
 Do NOT provide a thinking process.
+
 Do NOT use markdown.
+
 Do NOT return JSON.
+
 Do NOT include punctuation.
 
 The final response must be one short lowercase snake_case category.
@@ -326,53 +410,73 @@ video_streaming
 `;
 
 
+
     const response =
         await fetch(
+
             "https://api.groq.com/openai/v1/chat/completions",
+
             {
+
                 method: "POST",
 
                 headers: {
+
                     "Authorization":
                         `Bearer ${process.env.GROQ_API_KEY}`,
 
                     "Content-Type":
                         "application/json"
+
                 },
 
                 body: JSON.stringify({
 
-    model:
-        "openai/gpt-oss-20b",
+                    model:
+                        "openai/gpt-oss-20b",
 
-    messages: [
+                    messages: [
 
-        {
-            role: "user",
-            content:
-                `${prompt}
+                        {
+
+                            role: "user",
+
+                            content:
+                                `${prompt}
 
 App name: ${appName}
+
 Package name: ${packageName}`
-        }
 
-    ],
+                        }
 
-    temperature: 0,
+                    ],
 
-    // GPT-OSS supports low, medium, or high.
-    // Low minimizes reasoning-token usage.
-    reasoning_effort: "low",
+                    temperature: 0,
 
-    // Do not return the reasoning field.
-    include_reasoning: false,
+                    // GPT-OSS supports low, medium, or high.
+                    // Low reduces unnecessary reasoning.
 
-    // Groq's current parameter name.
-    max_completion_tokens: 300
+                    reasoning_effort:
+                        "low",
 
-})
+                    // Do not return the reasoning field
+                    // as part of the visible response.
+
+                    include_reasoning:
+                        false,
+
+                    // Current Groq token parameter.
+
+                    max_completion_tokens:
+                        300
+
+                })
+
             }
+
         );
+
 
 
     // --------------------------------------------------------
@@ -383,6 +487,7 @@ Package name: ${packageName}`
         await response.json();
 
 
+
     // --------------------------------------------------------
     // API ERROR
     // --------------------------------------------------------
@@ -390,13 +495,16 @@ Package name: ${packageName}`
     if (!response.ok) {
 
         throw new Error(
+
             `Groq API error ${response.status}: ${
                 data?.error?.message ||
                 JSON.stringify(data)
             }`
+
         );
 
     }
+
 
 
     // --------------------------------------------------------
@@ -407,8 +515,10 @@ Package name: ${packageName}`
         data?.choices?.[0]?.message;
 
 
+
     const output =
         message?.content;
+
 
 
     // --------------------------------------------------------
@@ -416,8 +526,11 @@ Package name: ${packageName}`
     // --------------------------------------------------------
 
     if (
+
         typeof output === "string" &&
+
         output.trim()
+
     ) {
 
         console.log(
@@ -427,6 +540,7 @@ Package name: ${packageName}`
         return output.trim();
 
     }
+
 
 
     // --------------------------------------------------------
@@ -446,19 +560,23 @@ Package name: ${packageName}`
     );
 
 
+
     // --------------------------------------------------------
+    // FALLBACK:
     // CHECK WHETHER MODEL PUT CATEGORY IN REASONING
-    //
-    // This is only a fallback.
     // --------------------------------------------------------
 
     const reasoning =
         message?.reasoning;
 
 
+
     if (
+
         typeof reasoning === "string" &&
+
         reasoning.trim()
+
     ) {
 
         const reasoningCategory =
@@ -469,7 +587,9 @@ Package name: ${packageName}`
         if (reasoningCategory) {
 
             console.log(
+
                 `⚠️ CATEGORY RECOVERED FROM MODEL RESPONSE: ${reasoningCategory}`
+
             );
 
             return reasoningCategory;
@@ -479,6 +599,7 @@ Package name: ${packageName}`
     }
 
 
+
     throw new Error(
         "Groq returned no usable content"
     );
@@ -486,18 +607,25 @@ Package name: ${packageName}`
 }
 
 
+
 // ============================================================
 // MAIN CLASSIFIER
 // ============================================================
 
 async function classifyApp(
+
     appName,
+
     packageName
+
 ) {
 
     if (
+
         !appName ||
+
         !packageName
+
     ) {
 
         throw new Error(
@@ -507,8 +635,11 @@ async function classifyApp(
     }
 
 
+
     if (
+
         !process.env.GROQ_API_KEY
+
     ) {
 
         throw new Error(
@@ -518,13 +649,18 @@ async function classifyApp(
     }
 
 
+
     try {
 
         const output =
             await requestClassification(
+
                 appName,
+
                 packageName
+
             );
+
 
 
         const rawCategory =
@@ -533,13 +669,17 @@ async function classifyApp(
             );
 
 
+
         if (!rawCategory) {
 
             throw new Error(
+
                 `Groq returned no usable category: ${output}`
+
             );
 
         }
+
 
 
         // ----------------------------------------------------
@@ -552,20 +692,30 @@ async function classifyApp(
             );
 
 
+
         console.log(
+
             `🤖 APP CLASSIFIED: ${appName} (${packageName}) → ${category}`
+
         );
+
 
 
         return category;
 
+
+
     } catch (error) {
 
         console.error(
+
             `❌ GROQ APP CLASSIFICATION FAILED: ${appName} (${packageName})`
+
         );
 
         console.error(error);
+
+
 
         throw error;
 
@@ -574,10 +724,13 @@ async function classifyApp(
 }
 
 
+
 // ============================================================
 // EXPORT
 // ============================================================
 
 module.exports = {
+
     classifyApp
+
 };
