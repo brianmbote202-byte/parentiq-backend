@@ -31,9 +31,11 @@ function validateCategory(category) {
         normalizeCategory(category);
 
     if (!normalized) {
+
         throw new Error(
             "AI returned an empty category"
         );
+
     }
 
     // --------------------------------------------------------
@@ -45,9 +47,11 @@ function validateCategory(category) {
             normalized
         )
     ) {
+
         throw new Error(
             `Invalid category format: ${category}`
         );
+
     }
 
     // --------------------------------------------------------
@@ -55,9 +59,11 @@ function validateCategory(category) {
     // --------------------------------------------------------
 
     if (normalized.length > 60) {
+
         throw new Error(
             `Category is too long: ${normalized}`
         );
+
     }
 
     // --------------------------------------------------------
@@ -68,9 +74,11 @@ function validateCategory(category) {
         normalized.split("_");
 
     if (words.length > 6) {
+
         throw new Error(
             `Category contains too many words: ${normalized}`
         );
+
     }
 
     console.log(
@@ -98,7 +106,6 @@ function extractCategory(output) {
     const text =
         output.trim();
 
-
     // --------------------------------------------------------
     // 1. CLEAN JSON
     // --------------------------------------------------------
@@ -116,6 +123,7 @@ function extractCategory(output) {
             return normalizeCategory(
                 parsed.category
             );
+
         }
 
     } catch (_) {
@@ -123,7 +131,6 @@ function extractCategory(output) {
         // Continue checking other formats.
 
     }
-
 
     // --------------------------------------------------------
     // 2. JSON EMBEDDED INSIDE OTHER TEXT
@@ -147,8 +154,8 @@ function extractCategory(output) {
         if (category) {
             return category;
         }
-    }
 
+    }
 
     // --------------------------------------------------------
     // 3. EXPLICIT CATEGORY DECLARATION
@@ -176,8 +183,8 @@ function extractCategory(output) {
         if (category) {
             return category;
         }
-    }
 
+    }
 
     // --------------------------------------------------------
     // 4. EXPLICIT FINAL CATEGORY SENTENCE
@@ -205,8 +212,8 @@ function extractCategory(output) {
         if (category) {
             return category;
         }
-    }
 
+    }
 
     // --------------------------------------------------------
     // 5. CLEAN SINGLE CATEGORY
@@ -214,8 +221,6 @@ function extractCategory(output) {
     // Example:
     //
     // artificial_intelligence
-    //
-    // This is the format explicitly requested.
     // --------------------------------------------------------
 
     if (
@@ -230,8 +235,8 @@ function extractCategory(output) {
         if (category) {
             return category;
         }
-    }
 
+    }
 
     return "";
 }
@@ -247,6 +252,7 @@ async function requestClassification(
 ) {
 
     const prompt = `
+
 You classify Android applications by their PRIMARY PURPOSE.
 
 You are NOT restricted to a predefined category list.
@@ -314,49 +320,54 @@ Do NOT include punctuation.
 Example output:
 
 video_streaming
+
 `;
 
 
     const response =
-    await fetch(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-            method: "POST",
+        await fetch(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {
+                method: "POST",
 
-            headers: {
-                "Authorization":
-                    `Bearer ${process.env.GROQ_API_KEY}`,
+                headers: {
+                    "Authorization":
+                        `Bearer ${process.env.GROQ_API_KEY}`,
 
-                "Content-Type":
-                    "application/json"
-            },
+                    "Content-Type":
+                        "application/json"
+                },
 
-            body: JSON.stringify({
+                body: JSON.stringify({
 
-                model:
-                    "openai/gpt-oss-20b",
+                    model:
+                        "openai/gpt-oss-20b",
 
-                messages: [
+                    messages: [
 
-                    {
-                        role: "system",
-                        content: prompt
-                    },
+                        {
+                            role: "system",
+                            content: prompt
+                        },
 
-                    {
-                        role: "user",
-                        content:
-                            `App name: ${appName}\nPackage name: ${packageName}`
-                    }
+                        {
+                            role: "user",
+                            content:
+                                `App name: ${appName}\nPackage name: ${packageName}`
+                        }
 
-                ],
+                    ],
 
-                temperature: 0,
+                    temperature: 0,
 
-                max_tokens: 100
-            })
-        }
-    );
+                    // Increased because GPT-OSS may use reasoning tokens.
+                    max_tokens: 300
+
+                })
+            }
+        );
+
+
     // --------------------------------------------------------
     // READ RESPONSE
     // --------------------------------------------------------
@@ -372,11 +383,12 @@ video_streaming
     if (!response.ok) {
 
         throw new Error(
-    `Groq API error ${response.status}: ${
-        data?.error?.message ||
-        JSON.stringify(data)
-    }`
-);
+            `Groq API error ${response.status}: ${
+                data?.error?.message ||
+                JSON.stringify(data)
+            }`
+        );
+
     }
 
 
@@ -402,10 +414,11 @@ video_streaming
     ) {
 
         console.log(
-    `🔎 GROQ RAW CLASSIFICATION: ${output}`
-);
+            `🔎 GROQ RAW CLASSIFICATION: ${output}`
+        );
 
         return output.trim();
+
     }
 
 
@@ -414,7 +427,7 @@ video_streaming
     // --------------------------------------------------------
 
     console.log(
-        "⚠️ OPENROUTER RESPONSE WITHOUT CONTENT:"
+        "⚠️ GROQ RESPONSE WITHOUT CONTENT:"
     );
 
     console.log(
@@ -430,7 +443,6 @@ video_streaming
     // CHECK WHETHER MODEL PUT CATEGORY IN REASONING
     //
     // This is only a fallback.
-    // We do NOT disable reasoning.
     // --------------------------------------------------------
 
     const reasoning =
@@ -454,13 +466,16 @@ video_streaming
             );
 
             return reasoningCategory;
+
         }
+
     }
 
 
     throw new Error(
         "Groq returned no usable content"
     );
+
 }
 
 
@@ -481,16 +496,19 @@ async function classifyApp(
         throw new Error(
             "appName and packageName are required"
         );
+
     }
 
 
     if (
-    !process.env.GROQ_API_KEY
-) {
-    throw new Error(
-        "GROQ_API_KEY is not configured"
-    );
-}
+        !process.env.GROQ_API_KEY
+    ) {
+
+        throw new Error(
+            "GROQ_API_KEY is not configured"
+        );
+
+    }
 
 
     try {
@@ -513,6 +531,7 @@ async function classifyApp(
             throw new Error(
                 `Groq returned no usable category: ${output}`
             );
+
         }
 
 
@@ -542,7 +561,9 @@ async function classifyApp(
         console.error(error);
 
         throw error;
+
     }
+
 }
 
 
