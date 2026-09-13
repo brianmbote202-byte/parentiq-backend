@@ -238,7 +238,7 @@ function extractCategory(output) {
 
 
 // ============================================================
-// OPENROUTER REQUEST
+// GROQ REQUEST
 // ============================================================
 
 async function requestClassification(
@@ -318,69 +318,45 @@ video_streaming
 
 
     const response =
-        await fetch(
-            "https://openrouter.ai/api/v1/chat/completions",
-            {
-                method: "POST",
+    await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+            method: "POST",
 
-                headers: {
-                    "Authorization":
-                        `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            headers: {
+                "Authorization":
+                    `Bearer ${process.env.GROQ_API_KEY}`,
 
-                    "Content-Type":
-                        "application/json",
+                "Content-Type":
+                    "application/json"
+            },
 
-                    "HTTP-Referer":
-                        "https://parentiq.app",
+            body: JSON.stringify({
 
-                    "X-Title":
-                        "ParentIQ App Classification"
-                },
+                model:
+                    "openai/gpt-oss-20b",
 
-                body: JSON.stringify({
+                messages: [
 
-                    model:
-                        "openrouter/free",
+                    {
+                        role: "system",
+                        content: prompt
+                    },
 
-                    messages: [
+                    {
+                        role: "user",
+                        content:
+                            `App name: ${appName}\nPackage name: ${packageName}`
+                    }
 
-                        {
-                            role: "system",
-                            content: prompt
-                        },
+                ],
 
-                        {
-                            role: "user",
-                            content:
-                                `App name: ${appName}\nPackage name: ${packageName}`
-                        }
+                temperature: 0,
 
-                    ],
-
-                    temperature: 0,
-
-                    max_tokens: 100
-
-                    // IMPORTANT:
-                    // Do NOT set reasoning here.
-                    //
-                    // openrouter/free may select a model
-                    // that requires reasoning.
-                    //
-                    // Setting:
-                    //
-                    // reasoning: { effort: "none" }
-                    //
-                    // can cause:
-                    //
-                    // HTTP 400:
-                    // "Reasoning is mandatory for this endpoint
-                    // and cannot be disabled."
-                })
-            }
-        );
-
-
+                max_tokens: 100
+            })
+        }
+    );
     // --------------------------------------------------------
     // READ RESPONSE
     // --------------------------------------------------------
@@ -396,11 +372,11 @@ video_streaming
     if (!response.ok) {
 
         throw new Error(
-            `OpenRouter API error ${response.status}: ${
-                data?.error?.message ||
-                JSON.stringify(data)
-            }`
-        );
+    `Groq API error ${response.status}: ${
+        data?.error?.message ||
+        JSON.stringify(data)
+    }`
+);
     }
 
 
@@ -426,8 +402,8 @@ video_streaming
     ) {
 
         console.log(
-            `🔎 OPENROUTER RAW CLASSIFICATION: ${output}`
-        );
+    `🔎 GROQ RAW CLASSIFICATION: ${output}`
+);
 
         return output.trim();
     }
@@ -483,7 +459,7 @@ video_streaming
 
 
     throw new Error(
-        "OpenRouter returned no usable content"
+        "Groq returned no usable content"
     );
 }
 
@@ -509,13 +485,12 @@ async function classifyApp(
 
 
     if (
-        !process.env.OPENROUTER_API_KEY
-    ) {
-
-        throw new Error(
-            "OPENROUTER_API_KEY is not configured"
-        );
-    }
+    !process.env.GROQ_API_KEY
+) {
+    throw new Error(
+        "GROQ_API_KEY is not configured"
+    );
+}
 
 
     try {
@@ -536,7 +511,7 @@ async function classifyApp(
         if (!rawCategory) {
 
             throw new Error(
-                `OpenRouter returned no usable category: ${output}`
+                `Groq returned no usable category: ${output}`
             );
         }
 
@@ -561,7 +536,7 @@ async function classifyApp(
     } catch (error) {
 
         console.error(
-            `❌ OPENROUTER APP CLASSIFICATION FAILED: ${appName} (${packageName})`
+            `❌ GROQ APP CLASSIFICATION FAILED: ${appName} (${packageName})`
         );
 
         console.error(error);
