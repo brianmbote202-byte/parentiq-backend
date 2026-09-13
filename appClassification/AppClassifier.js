@@ -317,6 +317,8 @@ Do NOT use markdown.
 Do NOT return JSON.
 Do NOT include punctuation.
 
+The final response must be one short lowercase snake_case category.
+
 Example output:
 
 video_streaming
@@ -340,30 +342,35 @@ video_streaming
 
                 body: JSON.stringify({
 
-                    model:
-                        "openai/gpt-oss-20b",
+    model:
+        "openai/gpt-oss-20b",
 
-                    messages: [
+    messages: [
 
-                        {
-                            role: "system",
-                            content: prompt
-                        },
+        {
+            role: "user",
+            content:
+                `${prompt}
 
-                        {
-                            role: "user",
-                            content:
-                                `App name: ${appName}\nPackage name: ${packageName}`
-                        }
+App name: ${appName}
+Package name: ${packageName}`
+        }
 
-                    ],
+    ],
 
-                    temperature: 0,
+    temperature: 0,
 
-                    // Increased because GPT-OSS may use reasoning tokens.
-                    max_tokens: 300
+    // GPT-OSS supports low, medium, or high.
+    // Low minimizes reasoning-token usage.
+    reasoning_effort: "low",
 
-                })
+    // Do not return the reasoning field.
+    include_reasoning: false,
+
+    // Groq's current parameter name.
+    max_completion_tokens: 300
+
+})
             }
         );
 
