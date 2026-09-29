@@ -5,6 +5,15 @@ require("./events/CacheEventListener");
 const SubscriptionManager = require("./subscriptions/SubscriptionManager");
 const CommissionManager = require("./commissions/CommissionManager");
 
+const crypto = require("crypto");
+
+//=======PAYPAL========
+const PayPalManager =
+    require("./payments/PayPalManager");
+
+const PayPalFulfillmentManager =
+    require("./payments/PayPalFulfillmentManager");    
+
 const WithdrawalManager =
     require("./withdrawals/WithdrawalManager");
 
@@ -138,7 +147,8 @@ const PaymentStatus =
 
     
 
-const { stkPush } = require("./mpesa/daraja");
+const { stkPush } = require("./mpesa/daraja"); 
+const PaystackManager = require("./payments/PaystackManager");
 const { db } = require("./firebase");
 
 const initializeDatabase = require("./database/DatabaseInitializer");
@@ -155,7 +165,11 @@ initializeDatabase()
     });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 
 
 
@@ -4759,6 +4773,2161 @@ app.get(
     }
 
 );
+
+
+//===========PAYPAL===============
+/*
+==================================================
+PAYPAL CREATE ORDER
+==================================================
+*/
+
+app.post(
+    "/paypal/create-order",
+    async (req, res) => {
+
+        try {
+
+            const {
+                uid,
+                childId,
+                planId
+            } = req.body;
+
+
+            if (
+                !uid ||
+                !childId ||
+                !planId
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "uid, childId and planId are required."
+
+                });
+
+            }
+
+
+            /*
+            ==========================================
+            VERIFY CHILD
+            ==========================================
+            */
+
+            const childSnap =
+                await db
+                    .ref("children")
+                    .child(childId)
+                    .get();
+
+
+            if (!childSnap.exists()) {
+
+                return res.status(404).json({
+
+                    success: false,
+
+                    message:
+                        "Child not found."
+
+                });
+
+            }
+
+
+            const child =
+                childSnap.val();
+
+
+            /*
+            ==========================================
+            VERIFY CHILD BELONGS TO PARENT
+            ==========================================
+            */
+
+            if (
+                child.parentId &&
+                child.parentId !== uid
+            ) {
+
+                return res.status(403).json({
+
+                    success: false,
+
+                    message:
+                        "Child does not belong to this account."
+
+                });
+
+            }
+
+
+            /*
+            ==========================================
+            VALIDATE PLAN
+            ==========================================
+            */
+
+            const plan =
+    await PlanManager.getPlan(
+        planId
+    );
+
+
+if (!plan) {
+
+    return res.status(400).json({
+
+        success: false,
+
+        message:
+            "Invalid subscription plan."
+
+    });
+
+}
+
+
+if (plan.active !== true) {
+
+    return res.status(400).json({
+
+        success: false,
+
+        message:
+            "This subscription plan is currently unavailable."
+
+    });
+
+}
+
+
+            /*
+            ==========================================
+            CREATE PAYPAL ORDER
+            ==========================================
+            */
+
+            const paypalOrder =
+                await PayPalManager.createOrder({
+
+                    uid,
+
+                    childId,
+
+                    planId
+
+                });
+
+
+            /*
+            ==========================================
+            SAVE LOCAL TRANSACTION
+            ==========================================
+            */
+
+            await db
+                .ref("paypal_transactions")
+                .child(
+                    paypalOrder.orderId
+                )
+                .set({
+
+                    orderId:
+                        paypalOrder.orderId,
+
+                    localReference:
+                        paypalOrder.localReference,
+
+                    uid,
+
+                    childId,
+
+                    planId,
+
+                    amount:
+                        Number(
+                            paypalOrder.amount
+                        ),
+
+                    currency:
+                        paypalOrder.currency,
+
+                    status:
+                        "CREATED",
+
+                    provider:
+                        "PAYPAL",
+
+                    createdAt:
+                        Date.now(),
+
+                    updatedAt:
+                        Date.now(),
+
+                    capturedAt:
+                        null
+
+                });
+
+
+            /*
+            ==========================================
+            RESPONSE
+            ==========================================
+            */
+
+            return res.json({
+
+                success: true,
+
+                data:
+                    paypalOrder
+
+            });
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "PayPal create order error:",
+                error
+            );
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    error.message ||
+                    "Failed to create PayPal order."
+
+            });
+
+        }
+
+    }
+);
+/*
+==================================================
+PAYPAL CAPTURE ORDER
+==================================================
+*/
+
+app.post(
+    "/paypal/capture-order",
+    async (req, res) => {
+
+        const orderId =
+            (req.body.orderId || "")
+                .trim();
+
+
+        if (!orderId) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "orderId is required."
+
+            });
+
+        }
+
+
+        try {
+
+            const result =
+                await PayPalFulfillmentManager
+                    .fulfillOrder(
+                        orderId
+                    );
+
+
+            return res.json(
+                result
+            );
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "PayPal capture error:",
+                error
+            );
+
+
+            try {
+
+                await db
+                    .ref("paypal_transactions")
+                    .child(orderId)
+                    .update({
+
+                        lastError:
+                            error.message,
+
+                        updatedAt:
+                            Date.now()
+
+                    });
+
+            }
+
+            catch (dbError) {
+
+                console.error(
+                    "Failed to save PayPal error:",
+                    dbError.message
+                );
+
+            }
+
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    error.message ||
+                    "PayPal capture failed."
+
+            });
+
+        }
+
+    }
+);
+/*
+==================================================
+PAYPAL CALLBACK
+==================================================
+*/
+
+app.get(
+    "/paypal/callback",
+    async (req, res) => {
+
+        try {
+
+            const orderId =
+                (req.query.token || "")
+                    .trim();
+
+
+            if (!orderId) {
+
+                return res.status(400).send(
+                    "PayPal order ID missing."
+                );
+
+            }
+
+
+            /*
+            ==========================================
+            FULFILL PAYMENT
+            ==========================================
+            */
+
+            const result =
+                await PayPalFulfillmentManager
+                    .fulfillOrder(
+                        orderId
+                    );
+
+
+            /*
+            ==========================================
+            SUCCESS PAGE
+            ==========================================
+            */
+
+            if (
+                result.success &&
+                result.status ===
+                "SUCCESS"
+            ) {
+
+                return res.send(`
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>ParentIQ Payment</title>
+
+<style>
+
+body {
+
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        #08101F;
+
+    color:
+        white;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    min-height:
+        100vh;
+
+    margin:
+        0;
+
+}
+
+.card {
+
+    width:
+        90%;
+
+    max-width:
+        480px;
+
+    background:
+        #101B33;
+
+    border-radius:
+        20px;
+
+    padding:
+        35px;
+
+    text-align:
+        center;
+
+    box-sizing:
+        border-box;
+
+}
+
+.success {
+
+    font-size:
+        50px;
+
+}
+
+h1 {
+
+    margin-bottom:
+        10px;
+
+}
+
+p {
+
+    color:
+        #B9C4D8;
+
+    line-height:
+        1.6;
+
+}
+
+button {
+
+    margin-top:
+        20px;
+
+    padding:
+        14px 25px;
+
+    border:
+        none;
+
+    border-radius:
+        12px;
+
+    background:
+        #4CC9F0;
+
+    color:
+        #08101F;
+
+    font-weight:
+        bold;
+
+    font-size:
+        16px;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<div class="success">
+✓
+</div>
+
+<h1>
+Payment Successful
+</h1>
+
+<p>
+Your ParentIQ subscription has been activated.
+</p>
+
+<p>
+You can now return to the ParentIQ app.
+</p>
+
+</div>
+
+</body>
+
+</html>
+                `);
+
+            }
+
+
+            return res.status(400).send(
+                "PayPal payment was not completed."
+            );
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "PayPal callback error:",
+                error
+            );
+
+            return res.status(500).send(
+                "PayPal payment processing failed."
+            );
+
+        }
+
+    }
+);
+/*
+==================================================
+PAYPAL CANCEL
+==================================================
+*/
+
+app.get(
+    "/paypal/cancel",
+    async (req, res) => {
+
+        try {
+
+            const orderId =
+                (req.query.token || "").trim();
+
+
+            /*
+            ==========================================
+            MARK TRANSACTION AS CANCELLED
+            ==========================================
+            */
+
+            if (orderId) {
+
+                const transactionRef =
+                    db
+                        .ref("paypal_transactions")
+                        .child(orderId);
+
+
+                const transactionSnap =
+                    await transactionRef.get();
+
+
+                /*
+                ------------------------------------------
+                ONLY MARK EXISTING NON-SUCCESSFUL
+                TRANSACTIONS AS CANCELLED
+                ------------------------------------------
+                */
+
+                if (transactionSnap.exists()) {
+
+                    const transaction =
+                        transactionSnap.val();
+
+
+                    if (
+                        transaction.status !==
+                        "SUCCESS"
+                    ) {
+
+                        await transactionRef.update({
+
+                            status:
+                                "CANCELLED",
+
+                            cancelledAt:
+                                Date.now(),
+
+                            updatedAt:
+                                Date.now()
+
+                        });
+
+                    }
+
+                }
+
+            }
+
+
+            /*
+            ==========================================
+            CANCELLED PAGE
+            ==========================================
+            */
+
+            return res.send(`
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>ParentIQ Payment Cancelled</title>
+
+<style>
+
+body {
+
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        #08101F;
+
+    color:
+        white;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    min-height:
+        100vh;
+
+    margin:
+        0;
+
+    padding:
+        20px;
+
+    box-sizing:
+        border-box;
+
+}
+
+.card {
+
+    width:
+        90%;
+
+    max-width:
+        450px;
+
+    background:
+        #101B33;
+
+    padding:
+        35px;
+
+    border-radius:
+        20px;
+
+    text-align:
+        center;
+
+    box-sizing:
+        border-box;
+
+}
+
+.icon {
+
+    font-size:
+        50px;
+
+    margin-bottom:
+        15px;
+
+}
+
+h1 {
+
+    margin:
+        0 0 15px 0;
+
+}
+
+p {
+
+    color:
+        #B9C4D8;
+
+    line-height:
+        1.6;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<div class="icon">
+×
+</div>
+
+<h1>
+Payment Cancelled
+</h1>
+
+<p>
+Your ParentIQ subscription was not activated.
+</p>
+
+<p>
+You can return to ParentIQ and try again.
+</p>
+
+</div>
+
+</body>
+
+</html>
+        `);
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "PayPal cancel error:",
+                error
+            );
+
+
+            /*
+            ==========================================
+            EVEN IF DATABASE UPDATE FAILS,
+            SHOW THE USER THE CANCELLED PAGE
+            ==========================================
+            */
+
+            return res.send(`
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>ParentIQ Payment Cancelled</title>
+
+<style>
+
+body {
+
+    font-family:
+        Arial,
+        sans-serif;
+
+    background:
+        #08101F;
+
+    color:
+        white;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    min-height:
+        100vh;
+
+    margin:
+        0;
+
+    padding:
+        20px;
+
+    box-sizing:
+        border-box;
+
+}
+
+.card {
+
+    width:
+        90%;
+
+    max-width:
+        450px;
+
+    background:
+        #101B33;
+
+    padding:
+        35px;
+
+    border-radius:
+        20px;
+
+    text-align:
+        center;
+
+    box-sizing:
+        border-box;
+
+}
+
+h1 {
+
+    margin-bottom:
+        15px;
+
+}
+
+p {
+
+    color:
+        #B9C4D8;
+
+    line-height:
+        1.6;
+
+}
+
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<h1>
+Payment Cancelled
+</h1>
+
+<p>
+Your ParentIQ subscription was not activated.
+</p>
+
+<p>
+You can return to ParentIQ and try again.
+</p>
+
+</div>
+
+</body>
+
+</html>
+        `);
+
+        }
+
+    }
+);
+
+
+/*
+==================================================
+PAYPAL STATUS
+==================================================
+*/
+
+app.get(
+    "/paypal/status/:orderId",
+    async (req, res) => {
+
+        try {
+
+            const orderId =
+                (req.params.orderId || "").trim();
+
+            const uid =
+                (req.query.uid || "").trim();
+
+
+            /*
+            ==========================================
+            VALIDATE ORDER ID
+            ==========================================
+            */
+
+            if (!orderId) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "orderId is required."
+
+                });
+
+            }
+
+
+            /*
+            ==========================================
+            VALIDATE UID
+            ==========================================
+            */
+
+            if (!uid) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "uid is required."
+
+                });
+
+            }
+
+
+            /*
+            ==========================================
+            LOAD LOCAL TRANSACTION
+            ==========================================
+            */
+
+            const transactionRef =
+                db
+                    .ref("paypal_transactions")
+                    .child(orderId);
+
+
+            const snap =
+                await transactionRef.get();
+
+
+            if (!snap.exists()) {
+
+                return res.status(404).json({
+
+                    success: false,
+
+                    message:
+                        "PayPal transaction not found."
+
+                });
+
+            }
+
+
+            const transaction =
+                snap.val();
+
+
+            /*
+            ==========================================
+            VERIFY TRANSACTION OWNER
+            ==========================================
+            */
+
+            if (
+                transaction.uid !== uid
+            ) {
+
+                return res.status(403).json({
+
+                    success: false,
+
+                    message:
+                        "You are not authorized to view this transaction."
+
+                });
+
+            }
+
+
+            /*
+            ==========================================
+            RESPONSE
+            ==========================================
+            */
+
+            return res.json({
+
+                success: true,
+
+                status:
+                    transaction.status,
+
+                orderId,
+
+                planId:
+                    transaction.planId,
+
+                amount:
+                    transaction.amount,
+
+                currency:
+                    transaction.currency,
+
+                /*
+                ------------------------------------------
+                OPTIONAL PROCESSING INFORMATION
+                ------------------------------------------
+                */
+
+                capturedAt:
+                    transaction.capturedAt ||
+                    null,
+
+                completedAt:
+                    transaction.completedAt ||
+                    null,
+
+                captureId:
+                    transaction.captureId ||
+                    null
+
+            });
+
+        }
+
+        catch (error) {
+
+            console.error(
+                "PayPal status error:",
+                error
+            );
+
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    error.message ||
+                    "Unable to retrieve PayPal status."
+
+            });
+
+        }
+
+    }
+);
+
+
+//==================PAYSTACK================
+app.post("/paystack/initialize", async (req, res) => {
+    try {
+        const {
+            uid,
+            childId,
+            planId
+        } = req.body;
+
+        if (!uid || !childId || !planId) {
+            return res.status(400).json({
+                success: false,
+                message: "uid, childId and planId are required"
+            });
+        }
+
+        // Get the plan from your backend
+        const plan = await PlanManager.getPlan(planId);
+
+        if (!plan) {
+            return res.status(404).json({
+                success: false,
+                message: "Plan not found"
+            });
+        }
+
+        const amount = Number(plan.price);
+
+        if (!Number.isFinite(amount) || amount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid plan price"
+            });
+        }
+
+        // Get parent information
+        const parentSnapshot = await db.ref(`parents/${uid}`).once("value");
+
+        if (!parentSnapshot.exists()) {
+            return res.status(404).json({
+                success: false,
+                message: "Parent account not found"
+            });
+        }
+
+        const parent = parentSnapshot.val();
+
+        if (!parent.email) {
+            return res.status(400).json({
+                success: false,
+                message: "Parent email is required for card payment"
+            });
+        }
+
+        // Verify child exists
+        const childSnapshot = await db.ref(`children/${childId}`).once("value");
+
+        if (!childSnapshot.exists()) {
+            return res.status(404).json({
+                success: false,
+                message: "Child not found"
+            });
+        }
+
+        const child = childSnapshot.val();
+
+        if (child.parentId !== uid) {
+            return res.status(403).json({
+                success: false,
+                message: "Child does not belong to this parent"
+            });
+        }
+
+        // Generate our own unique reference
+        const reference =
+            `PI_${childId}_${Date.now()}_${Math.random()
+                .toString(36)
+                .substring(2, 8)}`;
+
+        const callbackUrl =
+            process.env.PAYSTACK_CALLBACK_URL ||
+            "https://parentiq-backend.onrender.com/paystack/callback";
+
+        const response =
+            await PaystackManager.initializeTransaction({
+                email: parent.email,
+                amount,
+                reference,
+                callbackUrl,
+                metadata: {
+                    uid,
+                    childId,
+                    planId,
+                    planName: plan.name,
+                    amount,
+                    paymentMethod: "PAYSTACK_CARD"
+                }
+            });
+
+        if (!response.status) {
+            return res.status(400).json({
+                success: false,
+                message: response.message || "Paystack initialization failed"
+            });
+        }
+
+        // Store transaction BEFORE sending checkout URL to the app
+        await db.ref(`paystack_transactions/${reference}`).set({
+            reference,
+            uid,
+            childId,
+            planId,
+            planName: plan.name,
+            amount,
+            currency: "KES",
+            email: parent.email,
+            status: "PENDING",
+            processed: false,
+            createdAt: Date.now()
+        });
+
+        return res.json({
+            success: true,
+            message: "Paystack transaction initialized",
+            data: {
+                authorization_url: response.data.authorization_url,
+                access_code: response.data.access_code,
+                reference: response.data.reference
+            }
+        });
+
+    } catch (error) {
+        console.error(
+            "Paystack initialization error:",
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: "Unable to initialize Paystack payment",
+            error: error.message
+        });
+    }
+});
+
+app.get("/paystack/callback", async (req, res) => {
+    try {
+        const { reference } = req.query;
+
+        if (!reference) {
+            return res.status(400).send(
+                "Missing Paystack transaction reference"
+            );
+        }
+
+        console.log(
+            "Paystack callback received:",
+            reference
+        );
+
+        return res.send(`
+            <html>
+                <head>
+                    <title>ParentIQ Payment</title>
+                </head>
+                <body>
+                    <h2>Payment processing</h2>
+                    <p>You can return to the ParentIQ app.</p>
+                </body>
+            </html>
+        `);
+
+    } catch (error) {
+        console.error(
+            "Paystack callback error:",
+            error
+        );
+
+        return res.status(500).send(
+            "Payment callback error"
+        );
+    }
+});
+
+
+
+//======================================================
+// PAYSTACK WEBHOOK
+//======================================================
+
+app.post("/paystack/webhook", async (req, res) => {
+
+    try {
+
+        console.log("================================");
+        console.log("PAYSTACK WEBHOOK");
+        console.log("================================");
+
+        /*
+        ==================================================
+        VERIFY PAYSTACK SIGNATURE
+        ==================================================
+        */
+
+        const signature =
+            req.headers["x-paystack-signature"];
+
+        if (!signature || !req.rawBody) {
+
+            console.error(
+                "Missing Paystack signature or raw body."
+            );
+
+            return res.sendStatus(400);
+        }
+
+        const expectedSignature =
+            crypto
+                .createHmac(
+                    "sha512",
+                    process.env.PAYSTACK_SECRET_KEY
+                )
+                .update(req.rawBody)
+                .digest("hex");
+
+
+        /*
+        ==================================================
+        SIGNATURE MUST MATCH
+        ==================================================
+        */
+
+        if (signature !== expectedSignature) {
+
+            console.error(
+                "INVALID PAYSTACK WEBHOOK SIGNATURE"
+            );
+
+            return res.sendStatus(401);
+        }
+
+
+        /*
+        ==================================================
+        WEBHOOK EVENT
+        ==================================================
+        */
+
+        const event =
+            req.body;
+
+
+        console.log(
+            "Paystack Event:",
+            event.event
+        );
+
+
+        /*
+        ==================================================
+        ONLY PROCESS SUCCESSFUL PAYMENTS
+        ==================================================
+        */
+
+        if (
+            event.event !==
+            "charge.success"
+        ) {
+
+            console.log(
+                "Paystack event ignored:",
+                event.event
+            );
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        ==================================================
+        PAYSTACK PAYMENT DATA
+        ==================================================
+        */
+
+        const data =
+            event.data || {};
+
+
+        const reference =
+            data.reference;
+
+
+        if (!reference) {
+
+            console.error(
+                "Paystack webhook missing reference."
+            );
+
+            return res.sendStatus(200);
+        }
+
+
+        console.log(
+            "Paystack Reference:",
+            reference
+        );
+
+
+        /*
+        ==================================================
+        LOAD OUR TRANSACTION
+        ==================================================
+        */
+
+        const transactionRef =
+            db
+                .ref("paystack_transactions")
+                .child(reference);
+
+
+        const transactionSnapshot =
+            await transactionRef.once("value");
+
+
+        if (!transactionSnapshot.exists()) {
+
+            console.error(
+                "Paystack transaction not found:",
+                reference
+            );
+
+            return res.sendStatus(200);
+        }
+
+
+        const transaction =
+            transactionSnapshot.val();
+
+
+        console.log(
+            "Paystack Transaction:",
+            JSON.stringify(
+                transaction,
+                null,
+                2
+            )
+        );
+
+
+        /*
+        ==================================================
+        PREVENT DUPLICATE PROCESSING
+        ==================================================
+        */
+
+        if (
+            transaction.processed === true
+        ) {
+
+            console.log(
+                "Paystack transaction already processed:",
+                reference
+            );
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        ==================================================
+        EXTRACT OUR DATA
+        ==================================================
+        */
+
+        const childId =
+            transaction.childId;
+
+        const uid =
+            transaction.uid;
+
+        const planId =
+            transaction.planId;
+
+        const transactionAmount =
+            Number(
+                transaction.amount || 0
+            );
+
+
+        /*
+        ==================================================
+        VALIDATE CHILD
+        ==================================================
+        */
+
+        if (!childId) {
+
+            await transactionRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                failureReason:
+                    "MISSING_CHILD_ID",
+
+                processedAt:
+                    Date.now()
+
+            });
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        ==================================================
+        VALIDATE PLAN
+        ==================================================
+        */
+
+        if (!planId) {
+
+            await transactionRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                failureReason:
+                    "MISSING_PLAN_ID",
+
+                processedAt:
+                    Date.now()
+
+            });
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        ==================================================
+        LOAD PLAN
+        ==================================================
+        */
+
+        const plan =
+            await PlanManager.getPlan(
+                planId
+            );
+
+
+        if (!plan) {
+
+            console.error(
+                "Paystack plan not found:",
+                planId
+            );
+
+            await transactionRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                failureReason:
+                    "INVALID_PLAN",
+
+                processedAt:
+                    Date.now()
+
+            });
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        ==================================================
+        VALIDATE AMOUNT
+        ==================================================
+        */
+
+        const expectedAmount =
+            Number(plan.price);
+
+
+        const paidAmount =
+            Number(data.amount || 0) / 100;
+
+
+        console.log(
+            "================================"
+        );
+
+        console.log(
+            "PAYSTACK AMOUNT VALIDATION"
+        );
+
+        console.log(
+            "Expected:",
+            expectedAmount
+        );
+
+        console.log(
+            "Transaction:",
+            transactionAmount
+        );
+
+        console.log(
+            "Paystack:",
+            paidAmount
+        );
+
+        console.log(
+            "================================"
+        );
+
+
+        /*
+        --------------------------------------------------
+        OUR STORED TRANSACTION MUST MATCH PLAN
+        --------------------------------------------------
+        */
+
+        if (
+            !Number.isFinite(expectedAmount) ||
+            expectedAmount <= 0 ||
+            transactionAmount !== expectedAmount
+        ) {
+
+            console.error(
+                "PAYSTACK TRANSACTION AMOUNT INVALID"
+            );
+
+            await transactionRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                failureReason:
+                    "TRANSACTION_AMOUNT_INVALID",
+
+                expectedAmount,
+
+                transactionAmount,
+
+                processedAt:
+                    Date.now()
+
+            });
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        --------------------------------------------------
+        PAYSTACK ACTUAL AMOUNT MUST MATCH PLAN
+        --------------------------------------------------
+        */
+
+        if (
+            !Number.isFinite(paidAmount) ||
+            paidAmount <= 0 ||
+            paidAmount !== expectedAmount
+        ) {
+
+            console.error(
+                "PAYSTACK AMOUNT MISMATCH"
+            );
+
+            await transactionRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                failureReason:
+                    "AMOUNT_MISMATCH",
+
+                expectedAmount,
+
+                receivedAmount:
+                    paidAmount,
+
+                paystackTransactionId:
+                    data.id,
+
+                processedAt:
+                    Date.now()
+
+            });
+
+
+            return res.sendStatus(200);
+        }
+
+
+        /*
+        ==================================================
+        LOAD CHILD
+        ==================================================
+        */
+
+        const childRef =
+            db
+                .ref("children")
+                .child(childId);
+
+
+        const childSnapshot =
+            await childRef.once("value");
+
+
+        if (!childSnapshot.exists()) {
+
+            console.error(
+                "Paystack child not found:",
+                childId
+            );
+
+            await transactionRef.update({
+
+                status: "FAILED",
+
+                processed: true,
+
+                failureReason:
+                    "CHILD_NOT_FOUND",
+
+                processedAt:
+                    Date.now()
+
+            });
+
+            return res.sendStatus(200);
+        }
+
+
+        const child =
+            childSnapshot.val();
+
+
+        const now =
+            Date.now();
+
+
+        /*
+        ==================================================
+        ACTIVATE SUBSCRIPTION
+        ==================================================
+        */
+
+        await SubscriptionManager.activate(
+            childId,
+            planId
+        );
+
+
+        /*
+        ==================================================
+        FAMILY PLAN
+        ==================================================
+        */
+
+        if (
+            planId === "family" &&
+            child.parentId
+        ) {
+
+            await SubscriptionManager.activateFamily(
+                child.parentId,
+                childId,
+                planId
+            );
+
+        }
+
+
+        /*
+        ==================================================
+        BILLING
+        ==================================================
+        */
+
+        await childRef
+            .child("billing")
+            .update({
+
+                lastPaymentStatus:
+                    "SUCCESS",
+
+                lastPaymentMethod:
+                    "PAYSTACK_CARD",
+
+                lastPaymentReference:
+                    reference,
+
+                lastPaymentAmount:
+                    paidAmount,
+
+                lastPaidAt:
+                    now,
+
+                lastPlanId:
+                    planId
+
+            });
+
+
+        /*
+        ==================================================
+        PAYMENT HISTORY
+        ==================================================
+        */
+
+        await childRef
+            .child("payments")
+            .child(reference)
+            .set({
+
+                reference,
+
+                amount:
+                    paidAmount,
+
+                expectedAmount,
+
+                planId,
+
+                planName:
+                    plan.name,
+
+                status:
+                    "SUCCESS",
+
+                paymentMethod:
+                    "PAYSTACK_CARD",
+
+                paystackTransactionId:
+                    data.id,
+
+                customerEmail:
+                    data.customer?.email || "",
+
+                currency:
+                    data.currency || "KES",
+
+                paidAt:
+                    now
+
+            });
+
+
+        /*
+        ==================================================
+        LEDGER
+        ==================================================
+        */
+
+        await LedgerManager.record({
+
+            type:
+                LedgerTypes.SUBSCRIPTION_PAYMENT,
+
+            direction:
+                LedgerDirection.CREDIT,
+
+            category:
+                LedgerCategory.SUBSCRIPTION,
+
+            amount:
+                paidAmount,
+
+            parentId:
+                child.parentId ||
+                uid ||
+                "",
+
+            childId,
+
+            checkoutId:
+                reference,
+
+            description:
+                `${plan.name} subscription payment`,
+
+            metadata: {
+
+                planId,
+
+                planName:
+                    plan.name,
+
+                amount:
+                    paidAmount,
+
+                expectedAmount,
+
+                paymentMethod:
+                    "PAYSTACK_CARD",
+
+                paystackReference:
+                    reference,
+
+                paystackTransactionId:
+                    data.id,
+
+                currency:
+                    data.currency || "KES"
+
+            }
+
+        });
+
+
+        /*
+        ==================================================
+        UPDATE CHILD META
+        ==================================================
+        */
+
+        await childRef
+            .child("meta")
+            .update({
+
+                updatedAt:
+                    now
+
+            });
+
+
+        /*
+        ==================================================
+        FIND AGENT
+        ==================================================
+        */
+
+        let agentId =
+            null;
+
+
+        const parentId =
+            child.parentId ||
+            uid;
+
+
+        if (parentId) {
+
+            const parentSnapshot =
+                await db
+                    .ref("parents")
+                    .child(parentId)
+                    .once("value");
+
+
+            if (
+                parentSnapshot.exists()
+            ) {
+
+                const parent =
+                    parentSnapshot.val();
+
+
+                agentId =
+                    parent?.referral?.agentId ||
+                    null;
+
+            }
+
+        }
+
+
+        /*
+        ==================================================
+        AGENT COMMISSION
+        ==================================================
+        */
+
+        if (agentId) {
+
+            await CommissionManager.recordCommission({
+
+                agentId,
+
+                childId,
+
+                planId,
+
+                checkoutId:
+                    reference
+
+            });
+
+
+            /*
+            ----------------------------------------------
+            REFRESH AGENT CACHE
+            ----------------------------------------------
+            */
+
+            try {
+
+                await CacheManager.refreshAgent(
+                    agentId
+                );
+
+            } catch (cacheError) {
+
+                console.error(
+                    "Agent cache refresh failed:",
+                    cacheError.message
+                );
+
+            }
+
+
+            /*
+            ----------------------------------------------
+            CLEAR DASHBOARD CACHE
+            ----------------------------------------------
+            */
+
+            try {
+
+                DashboardCache.clear(
+                    agentId
+                );
+
+            } catch (cacheError) {
+
+                console.error(
+                    "Dashboard cache clear failed:",
+                    cacheError.message
+                );
+
+            }
+
+        }
+
+
+        /*
+        ==================================================
+        MARK PAYSTACK TRANSACTION COMPLETE
+        ==================================================
+        */
+
+        await transactionRef.update({
+
+            status:
+                "SUCCESS",
+
+            processed:
+                true,
+
+            processedAt:
+                now,
+
+            completedAt:
+                now,
+
+            paidAmount,
+
+            expectedAmount,
+
+            paystackTransactionId:
+                data.id,
+
+            channel:
+                data.channel || "card",
+
+            currency:
+                data.currency || "KES",
+
+            customerEmail:
+                data.customer?.email || "",
+
+            gatewayResponse:
+                data.gateway_response || "",
+
+            paidAt:
+                data.paid_at || null
+
+        });
+
+
+        /*
+        ==================================================
+        FINAL LOG
+        ==================================================
+        */
+
+        console.log(
+            "================================"
+        );
+
+        console.log(
+            "PAYSTACK PAYMENT COMPLETED"
+        );
+
+        console.log(
+            "Child:",
+            childId
+        );
+
+        console.log(
+            "Plan:",
+            planId
+        );
+
+        console.log(
+            "Amount:",
+            paidAmount
+        );
+
+        console.log(
+            "Reference:",
+            reference
+        );
+
+        console.log(
+            "================================"
+        );
+
+
+        return res.sendStatus(200);
+
+    }
+
+    catch (error) {
+
+        console.error(
+            "PAYSTACK WEBHOOK ERROR:",
+            error
+        );
+
+        /*
+        IMPORTANT:
+        Paystack should receive HTTP 200
+        after the webhook has been received.
+        */
+
+        return res.sendStatus(200);
+    }
+
+});
 
 const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
