@@ -107,6 +107,9 @@ const payoutRoutes =
 
 const MpesaB2CManager =
     require("./payments/MpesaB2CManager");  
+
+const PayPalPayoutManager =
+    require("./payments/PayPalPayoutManager");    
     
 const AccountBalanceManager =
     require("./mpesa/AccountBalanceManager");   
@@ -3489,8 +3492,27 @@ app.post("/withdrawals/:id/pay", async (req, res) => {
         ======================================
         */
 
-        const payment =
-    await MpesaB2CManager.sendMoney(withdrawal);
+        let payment;
+
+if (
+    withdrawal.paymentMethod === "PAYPAL"
+) {
+
+    const PayPalPayoutManager =
+        require("./payments/PayPalPayoutManager");
+
+    payment =
+        await PayPalPayoutManager
+            .sendMoney(withdrawal);
+
+}
+else {
+
+    payment =
+        await MpesaB2CManager
+            .sendMoney(withdrawal);
+
+}
 
     console.log("PaymentResult:", payment);
 
@@ -3500,19 +3522,27 @@ console.log(payment);
 
       if (payment.success) {
 
-    await WithdrawalManager.markProcessing(
+    if (
+        withdrawal.paymentMethod === "MPESA"
+    ) {
 
-        withdrawalId,
+        await WithdrawalManager.markProcessing(
 
-        payment.conversationId,
+            withdrawalId,
 
-        payment.originatorConversationId
+            payment.conversationId,
 
-    );
+            payment.originatorConversationId
 
-    console.log("Withdrawal marked as PROCESSING");
+        );
 
-}    
+        console.log(
+            "M-Pesa withdrawal marked as PROCESSING"
+        );
+
+    }
+
+}  
 
        /*
 ======================================
@@ -7061,133 +7091,69 @@ app.post("/paystack/webhook", async (req, res) => {
 
 });
 
-// ============================================================
-// LIVE PRICING
-// ============================================================
 
-app.get("/pricing", async (req, res) => {
-
+app.get("/paypal/test-connection", async (req, res) => {
     try {
+        const axios = require("axios");
 
-        const plans =
-            await PlanManager.getAllPlans();
+        const clientId = process.env.PAYPAL_CLIENT_ID;
+        const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
 
-        const fx =
-            await getUsdToKesRate();
-
-        const rate =
-            Number(fx.rate);
-
-        if (
-            !Number.isFinite(rate) ||
-            rate <= 0
-        ) {
-            throw new Error(
-                "Invalid USD/KES exchange rate"
-            );
+        if (!clientId || !clientSecret) {
+            return res.status(500).json({
+                success: false,
+                message: "PayPal Sandbox credentials are missing."
+            });
         }
 
-        const result = {};
+        const baseUrl =
+            process.env.PAYPAL_ENVIRONMENT === "live"
+                ? "https://api-m.paypal.com"
+                : "https://api-m.sandbox.paypal.com";
 
-        for (const planId of ["premium", "family"]) {
-
-            const plan =
-                plans[planId];
-
-            if (!plan) {
-                continue;
+        const response = await axios.post(
+            `${baseUrl}/v1/oauth2/token`,
+            "grant_type=client_credentials",
+            {
+                auth: {
+                    username: clientId,
+                    password: clientSecret
+                },
+                headers: {
+                    "Content-Type":
+                        "application/x-www-form-urlencoded"
+                },
+                timeout: 15000
             }
+        );
 
-            const amountKES =
-                Number(plan.price);
-
-            if (
-                !Number.isFinite(amountKES) ||
-                amountKES <= 0
-            ) {
-                continue;
-            }
-
-            const oldAmountKES =
-                Number(
-                    plan.oldPrice ||
-                    plan.originalPrice ||
-                    0
-                );
-
-            const amountUSD =
-                Number(
-                    (amountKES / rate).toFixed(2)
-                );
-
-            const oldAmountUSD =
-                oldAmountKES > 0
-                    ? Number(
-                        (
-                            oldAmountKES /
-                            rate
-                        ).toFixed(2)
-                    )
-                    : null;
-
-            result[planId] = {
-
-                planId,
-
-                name:
-                    plan.name ||
-                    planId,
-
-                amountKES,
-
-                amountUSD,
-
-                oldAmountKES:
-                    oldAmountKES > 0
-                        ? oldAmountKES
-                        : null,
-
-                oldAmountUSD,
-
-                currencyKES:
-                    "KES",
-
-                currencyUSD:
-                    "USD"
-            };
-        }
-
-        return res.json({
-
+        res.json({
             success: true,
-
-            fx: {
-                rate,
-                provider:
-                    fx.provider || null,
-                date:
-                    fx.date || null
-            },
-
-            plans: result
+            message: "PayPal Sandbox connection successful.",
+            environment:
+                process.env.PAYPAL_ENVIRONMENT,
+            tokenType: response.data.token_type,
+            expiresIn: response.data.expires_in
         });
 
     } catch (error) {
 
         console.error(
-            "Pricing endpoint error:",
-            error
+            "PAYPAL SANDBOX CONNECTION ERROR:",
+            error.response?.data || error.message
         );
 
-        return res.status(500).json({
-
+        res.status(500).json({
             success: false,
-
-            message:
-                "Unable to retrieve current pricing."
+            message: "PayPal Sandbox connection failed.",
+            error:
+                error.response?.data ||
+                error.message
         });
     }
 });
+
+
 
 const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
