@@ -5,6 +5,9 @@ const router = express.Router();
 const withdrawalManager =
     require("../withdrawals/WithdrawalManager");
 
+const PayPalPayoutManager =
+    require("../payments/PayPalPayoutManager");
+
 const { db } =
     require("../firebase");
 
@@ -23,6 +26,7 @@ router.post("/request", async (req, res) => {
             "WITHDRAWAL REQUEST BODY:",
             req.body
         );
+
 
         const result =
             await withdrawalManager.requestWithdrawal({
@@ -43,13 +47,14 @@ router.post("/request", async (req, res) => {
                     req.body.paypalEmail || "",
 
                 /*
-                PayPal payout amount.
+                ==========================================
+                PAYPAL PAYOUT AMOUNT
 
-                For Sandbox testing we can send
-                a small USD amount.
+                Sandbox testing can send a small USD amount.
 
-                Production should calculate this
-                using the configured FX rate.
+                Production should calculate this on the
+                backend using the configured FX rate.
+                ==========================================
                 */
 
                 payoutAmount:
@@ -60,7 +65,7 @@ router.post("/request", async (req, res) => {
             });
 
 
-        res.status(200).json({
+        return res.status(200).json({
 
             success: true,
 
@@ -86,7 +91,8 @@ router.post("/request", async (req, res) => {
             e
         );
 
-        res.status(400).json({
+
+        return res.status(400).json({
 
             success: false,
 
@@ -117,7 +123,7 @@ router.get(
                     );
 
 
-            res.json({
+            return res.json({
 
                 success: true,
 
@@ -129,7 +135,13 @@ router.get(
 
         catch (e) {
 
-            res.status(400).json({
+            console.error(
+                "GET AGENT WITHDRAWALS ERROR:",
+                e
+            );
+
+
+            return res.status(400).json({
 
                 success: false,
 
@@ -137,6 +149,7 @@ router.get(
                     e.message
             });
         }
+
     }
 );
 
@@ -180,7 +193,7 @@ router.get("/", async (req, res) => {
         );
 
 
-        res.json({
+        return res.json({
 
             success: true,
 
@@ -192,7 +205,13 @@ router.get("/", async (req, res) => {
 
     catch (e) {
 
-        res.status(500).json({
+        console.error(
+            "GET ALL WITHDRAWALS ERROR:",
+            e
+        );
+
+
+        return res.status(500).json({
 
             success: false,
 
@@ -223,7 +242,7 @@ router.get(
                     );
 
 
-            res.json({
+            return res.json({
 
                 success: true,
 
@@ -234,7 +253,13 @@ router.get(
 
         catch (e) {
 
-            res.status(400).json({
+            console.error(
+                "GET WITHDRAWAL DETAILS ERROR:",
+                e
+            );
+
+
+            return res.status(400).json({
 
                 success: false,
 
@@ -242,6 +267,7 @@ router.get(
                     e.message
             });
         }
+
     }
 );
 
@@ -266,13 +292,19 @@ router.post("/approve", async (req, res) => {
                 );
 
 
-        res.json(result);
+        return res.json(result);
 
     }
 
     catch (e) {
 
-        res.status(400).json({
+        console.error(
+            "APPROVE WITHDRAWAL ERROR:",
+            e
+        );
+
+
+        return res.status(400).json({
 
             success: false,
 
@@ -304,13 +336,19 @@ router.post("/reject", async (req, res) => {
                 );
 
 
-        res.json(result);
+        return res.json(result);
 
     }
 
     catch (e) {
 
-        res.status(400).json({
+        console.error(
+            "REJECT WITHDRAWAL ERROR:",
+            e
+        );
+
+
+        return res.status(400).json({
 
             success: false,
 
@@ -320,6 +358,398 @@ router.post("/reject", async (req, res) => {
     }
 
 });
+
+
+/*
+====================================================
+PAYPAL PAYOUT STATUS
+====================================================
+
+GET:
+
+/withdrawals/paypal/status/:paypalBatchId
+
+Example:
+
+/withdrawals/paypal/status/P2HHXKM59C2QN
+
+
+This endpoint:
+
+1. Queries PayPal.
+2. Reads the batch status.
+3. Reads individual payout item status.
+4. Saves the latest PayPal information to Firebase.
+5. If PayPal confirms COMPLETED:
+       → marks withdrawal as PAID.
+6. If PayPal reports a failure:
+       → marks withdrawal as PAYMENT_FAILED.
+7. Otherwise:
+       → keeps withdrawal PROCESSING.
+
+IMPORTANT:
+
+PayPal API acceptance is NOT treated as payment completion.
+====================================================
+*/
+
+router.get(
+    "/paypal/status/:paypalBatchId",
+    async (req, res) => {
+
+        try {
+
+            const paypalBatchId =
+                req.params.paypalBatchId;
+
+
+            if (!paypalBatchId) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        "PayPal batch ID is required."
+                });
+            }
+
+
+            console.log(
+                "Checking PayPal payout status:",
+                paypalBatchId
+            );
+
+
+            /*
+            ==========================================
+            QUERY PAYPAL
+            ==========================================
+            */
+
+            const paypalStatus =
+                await PayPalPayoutManager
+                    .getPayoutStatus(
+                        paypalBatchId
+                    );
+
+
+            console.log(
+                "PAYPAL STATUS RESULT:",
+                JSON.stringify(
+                    paypalStatus,
+                    null,
+                    2
+                )
+            );
+
+
+            /*
+            ==========================================
+            FIND LOCAL WITHDRAWAL
+            ==========================================
+            */
+
+            const withdrawalSnapshot =
+                await db
+                    .ref("withdrawalRequests")
+                    .orderByChild("paypalBatchId")
+                    .equalTo(paypalBatchId)
+                    .get();
+
+
+            let withdrawalId = null;
+            let withdrawal = null;
+
+
+            withdrawalSnapshot.forEach(child => {
+
+                withdrawalId =
+                    child.key;
+
+                withdrawal =
+                    child.val();
+
+            });
+
+
+            /*
+            ==========================================
+            EXTRACT PAYPAL STATUS
+            ==========================================
+            */
+
+            const batchStatus =
+                String(
+                    paypalStatus.batchStatus || ""
+                ).toUpperCase();
+
+
+            const items =
+                Array.isArray(
+                    paypalStatus.items
+                )
+                    ? paypalStatus.items
+                    : [];
+
+
+            const firstItem =
+                items.length > 0
+                    ? items[0]
+                    : null;
+
+
+            const transactionStatus =
+                firstItem
+                    ? String(
+                        firstItem.transactionStatus || ""
+                    ).toUpperCase()
+                    : "";
+
+
+            const transactionId =
+                firstItem
+                    ? (
+                        firstItem.transactionId || ""
+                    )
+                    : "";
+
+
+            const paypalItemId =
+                firstItem
+                    ? (
+                        firstItem.paypalItemId || ""
+                    )
+                    : "";
+
+
+            /*
+            ==========================================
+            SAVE CURRENT PAYPAL STATUS
+            ==========================================
+            */
+
+            if (withdrawalId) {
+
+                await db
+                    .ref("withdrawalRequests")
+                    .child(withdrawalId)
+                    .update({
+
+                        paypalBatchId:
+                            paypalStatus.paypalBatchId ||
+                            paypalBatchId,
+
+                        paypalItemId:
+                            paypalItemId,
+
+                        paypalTransactionId:
+                            transactionId,
+
+                        paypalBatchStatus:
+                            batchStatus,
+
+                        paypalTransactionStatus:
+                            transactionStatus,
+
+                        paymentReference:
+                            transactionId ||
+                            paypalBatchId,
+
+                        updatedAt:
+                            Date.now()
+                    });
+
+
+                /*
+                ======================================
+                PAYPAL COMPLETED
+                ======================================
+                */
+
+                if (
+                    batchStatus === "COMPLETED" ||
+                    transactionStatus === "SUCCESS" ||
+                    transactionStatus === "COMPLETED"
+                ) {
+
+                    console.log(
+                        "PayPal payout COMPLETED:",
+                        withdrawalId
+                    );
+
+
+                    /*
+                    Only mark paid if the local withdrawal
+                    has not already been completed.
+                    */
+
+                    const currentSnapshot =
+                        await db
+                            .ref("withdrawalRequests")
+                            .child(withdrawalId)
+                            .get();
+
+
+                    if (currentSnapshot.exists()) {
+
+                        const current =
+                            currentSnapshot.val();
+
+
+                        if (
+                            current.status !== "paid"
+                        ) {
+
+                            await withdrawalManager
+                                .markAsPaid(
+
+                                    withdrawalId,
+
+                                    transactionId,
+
+                                    transactionId ||
+                                    paypalBatchId
+                                );
+                        }
+
+                    }
+
+                }
+
+
+                /*
+                ======================================
+                PAYPAL FAILURE
+                ======================================
+                */
+
+                else if (
+                    batchStatus === "FAILED" ||
+                    batchStatus === "DENIED" ||
+                    batchStatus === "CANCELED" ||
+                    batchStatus === "CANCELLED" ||
+                    transactionStatus === "FAILED" ||
+                    transactionStatus === "BLOCKED" ||
+                    transactionStatus === "RETURNED" ||
+                    transactionStatus === "REFUNDED"
+                ) {
+
+                    console.log(
+                        "PayPal payout FAILED:",
+                        withdrawalId
+                    );
+
+
+                    await withdrawalManager
+                        .markPaymentFailed(
+
+                            withdrawalId,
+
+                            `PayPal payout status: ${
+                                transactionStatus ||
+                                batchStatus
+                            }`
+                        );
+                }
+
+
+                /*
+                ======================================
+                STILL PROCESSING
+                ======================================
+                */
+
+                else {
+
+                    console.log(
+                        "PayPal payout still processing:",
+                        withdrawalId
+                    );
+
+
+                    await db
+                        .ref("withdrawalRequests")
+                        .child(withdrawalId)
+                        .update({
+
+                            status:
+                                "processing",
+
+                            paymentStatus:
+                                "PROCESSING",
+
+                            updatedAt:
+                                Date.now()
+                        });
+                }
+
+            }
+
+
+            /*
+            ==========================================
+            RETURN RESULT
+            ==========================================
+            */
+
+            return res.json({
+
+                success: true,
+
+                message:
+                    "PayPal payout status retrieved.",
+
+                withdrawalId,
+
+                synchronized:
+                    Boolean(withdrawalId),
+
+                data: {
+
+                    paypalBatchId:
+                        paypalStatus.paypalBatchId ||
+                        paypalBatchId,
+
+                    batchStatus,
+
+                    paypalItemId,
+
+                    transactionStatus,
+
+                    transactionId,
+
+                    items
+                }
+            });
+
+        }
+
+        catch (e) {
+
+            console.error(
+                "PAYPAL STATUS ERROR:",
+                e.response?.data ||
+                e.message ||
+                e
+            );
+
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    "Failed to retrieve PayPal payout status.",
+
+                error:
+                    e.response?.data ||
+                    e.message
+            });
+        }
+
+    }
+);
 
 
 /*
@@ -335,14 +765,11 @@ PAYPAL:
 
 IMPORTANT:
 
-A successful PayPal API request means the
-payout was accepted/created.
+Submitting a payout to PayPal does NOT mean
+the recipient has received the money.
 
-It does NOT automatically mean the recipient
-has received the money.
-
-Therefore PayPal remains PROCESSING until
-PayPal confirms completion.
+PayPal remains PROCESSING until its status
+is confirmed.
 ====================================================
 */
 
@@ -357,9 +784,9 @@ router.post(
 
 
             /*
-            ============================================
+            ==========================================
             LOAD WITHDRAWAL
-            ============================================
+            ==========================================
             */
 
             const snapshot =
@@ -386,9 +813,9 @@ router.post(
 
 
             /*
-            ============================================
+            ==========================================
             VALIDATE STATUS
-            ============================================
+            ==========================================
             */
 
             if (
@@ -407,20 +834,16 @@ router.post(
 
 
             /*
-            ============================================
+            ==========================================
             PAYPAL
-            ============================================
+            ==========================================
             */
 
             if (
-                withdrawal.paymentMethod === "PAYPAL"
+                String(
+                    withdrawal.paymentMethod || ""
+                ).toUpperCase() === "PAYPAL"
             ) {
-
-                const PayPalPayoutManager =
-                    require(
-                        "../payments/PayPalPayoutManager"
-                    );
-
 
                 console.log(
                     "Starting PayPal payout:",
@@ -436,9 +859,9 @@ router.post(
 
 
                 /*
-                ========================================
+                ======================================
                 PAYPAL REQUEST FAILED
-                ========================================
+                ======================================
                 */
 
                 if (!payment.success) {
@@ -449,7 +872,7 @@ router.post(
                             withdrawalId,
 
                             payment.message ||
-                                "PayPal payout failed."
+                            "PayPal payout failed."
                         );
 
 
@@ -467,17 +890,14 @@ router.post(
 
 
                 /*
-                ========================================
+                ======================================
                 PAYPAL REQUEST ACCEPTED
-                ========================================
 
-                Do NOT mark as PAID yet.
+                DO NOT MARK PAID.
 
-                PayPal has accepted the payout request
-                and returned a payout batch.
-
-                We mark it PROCESSING.
-                ========================================
+                PayPal has only accepted the payout
+                request.
+                ======================================
                 */
 
                 await withdrawalManager
@@ -486,17 +906,17 @@ router.post(
                         withdrawalId,
 
                         payment.paypalBatchId ||
-                            "",
+                        "",
 
                         payment.paypalItemId ||
-                            ""
+                        ""
                     );
 
 
                 /*
-                ========================================
+                ======================================
                 SAVE PAYPAL IDs
-                ========================================
+                ======================================
                 */
 
                 await db
@@ -558,9 +978,9 @@ router.post(
 
 
             /*
-            ============================================
+            ==========================================
             M-PESA
-            ============================================
+            ==========================================
             */
 
             const MpesaB2CManager =
@@ -583,9 +1003,9 @@ router.post(
 
 
             /*
-            ============================================
+            ==========================================
             M-PESA FAILED
-            ============================================
+            ==========================================
             */
 
             if (!payment.success) {
@@ -596,7 +1016,7 @@ router.post(
                         withdrawalId,
 
                         payment.message ||
-                            "M-Pesa payment failed."
+                        "M-Pesa payment failed."
                     );
 
 
@@ -614,9 +1034,9 @@ router.post(
 
 
             /*
-            ============================================
+            ==========================================
             M-PESA PROCESSING
-            ============================================
+            ==========================================
             */
 
             await withdrawalManager
@@ -625,10 +1045,10 @@ router.post(
                     withdrawalId,
 
                     payment.conversationId ||
-                        "",
+                    "",
 
                     payment.originatorConversationId ||
-                        ""
+                    ""
                 );
 
 
@@ -673,7 +1093,7 @@ router.post(
             );
 
 
-            res.status(500).json({
+            return res.status(500).json({
 
                 success: false,
 
@@ -681,6 +1101,7 @@ router.post(
                     e.message
             });
         }
+
     }
 );
 
@@ -690,12 +1111,10 @@ router.post(
 MARK WITHDRAWAL AS PAID
 ====================================================
 
-This remains available for admin/manual
-completion.
+Manual/admin endpoint.
 
-For automatic payment providers, their confirmed
-successful callback/status should eventually call
-WithdrawalManager.markAsPaid().
+Automatic providers should only call
+markAsPaid() after confirmed provider success.
 ====================================================
 */
 
@@ -712,20 +1131,26 @@ router.post(
                         req.body.withdrawalId,
 
                         req.body.mpesaReceipt ||
-                            "",
+                        "",
 
                         req.body.providerReference ||
-                            ""
+                        ""
                     );
 
 
-            res.json(result);
+            return res.json(result);
 
         }
 
         catch (e) {
 
-            res.status(400).json({
+            console.error(
+                "MARK WITHDRAWAL PAID ERROR:",
+                e
+            );
+
+
+            return res.status(400).json({
 
                 success: false,
 
@@ -733,6 +1158,7 @@ router.post(
                     e.message
             });
         }
+
     }
 );
 
