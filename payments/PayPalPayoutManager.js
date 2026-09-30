@@ -1,5 +1,7 @@
 const axios = require("axios");
+
 const { db } = require("../firebase");
+
 
 class PayPalPayoutManager {
 
@@ -19,9 +21,13 @@ class PayPalPayoutManager {
                 .trim()
                 .toLowerCase();
 
+
         if (environment === "live") {
+
             return "https://api-m.paypal.com";
+
         }
+
 
         return "https://api-m.sandbox.paypal.com";
     }
@@ -41,11 +47,14 @@ class PayPalPayoutManager {
         const clientSecret =
             process.env.PAYPAL_CLIENT_SECRET;
 
+
         if (!clientId || !clientSecret) {
+
             throw new Error(
                 "Missing PayPal API credentials."
             );
         }
+
 
         const auth =
             Buffer
@@ -54,31 +63,40 @@ class PayPalPayoutManager {
                 )
                 .toString("base64");
 
+
         const response =
             await axios.post(
+
                 `${this.getBaseUrl()}/v1/oauth2/token`,
+
                 "grant_type=client_credentials",
+
                 {
                     timeout: 30000,
 
                     headers: {
+
                         Authorization:
                             `Basic ${auth}`,
 
                         "Content-Type":
                             "application/x-www-form-urlencoded"
+
                     }
                 }
             );
+
 
         if (
             !response.data ||
             !response.data.access_token
         ) {
+
             throw new Error(
                 "PayPal did not return an access token."
             );
         }
+
 
         return response.data.access_token;
     }
@@ -91,10 +109,12 @@ class PayPalPayoutManager {
 
     IMPORTANT:
 
-    This ID must remain stable when retrying the
-    same logical withdrawal.
+    This ID remains stable when retrying the same
+    logical withdrawal.
 
-    PayPal uses sender_batch_id to prevent duplicates.
+    PayPal uses sender_batch_id to prevent duplicate
+    payouts.
+    ==================================================
     */
 
     getSenderBatchId(withdrawal) {
@@ -160,6 +180,7 @@ class PayPalPayoutManager {
                 .trim()
                 .toLowerCase();
 
+
         if (!paypalEmail) {
 
             throw new Error(
@@ -170,6 +191,7 @@ class PayPalPayoutManager {
 
         const emailRegex =
             /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 
         if (!emailRegex.test(paypalEmail)) {
 
@@ -206,6 +228,7 @@ class PayPalPayoutManager {
                 withdrawal.payoutAmount || 0
             );
 
+
         if (
             !Number.isFinite(payoutAmount) ||
             payoutAmount <= 0
@@ -224,7 +247,9 @@ class PayPalPayoutManager {
         */
 
         const senderBatchId =
-            this.getSenderBatchId(withdrawal);
+            this.getSenderBatchId(
+                withdrawal
+            );
 
 
         /*
@@ -234,10 +259,14 @@ class PayPalPayoutManager {
         */
 
         const paymentRef =
-            db.ref("payments").push();
+            db
+                .ref("payments")
+                .push();
+
 
         const paymentId =
             paymentRef.key;
+
 
         const now =
             Date.now();
@@ -285,6 +314,9 @@ class PayPalPayoutManager {
             paypalItemId:
                 "",
 
+            paypalTransactionId:
+                "",
+
             createdAt:
                 now,
 
@@ -301,12 +333,14 @@ class PayPalPayoutManager {
 
         let accessToken;
 
+
         try {
 
             accessToken =
                 await this.getAccessToken();
 
         }
+
         catch (error) {
 
             await paymentRef.update({
@@ -323,6 +357,7 @@ class PayPalPayoutManager {
                 updatedAt:
                     Date.now()
             });
+
 
             return {
 
@@ -404,6 +439,31 @@ class PayPalPayoutManager {
             );
 
 
+            console.log(
+                "PayPal environment:",
+                process.env.PAYPAL_ENVIRONMENT ||
+                "sandbox"
+            );
+
+
+            console.log(
+                "PayPal currency:",
+                currency
+            );
+
+
+            console.log(
+                "PayPal payout amount:",
+                payoutAmount
+            );
+
+
+            console.log(
+                "PayPal sender batch ID:",
+                senderBatchId
+            );
+
+
             const response =
                 await axios.post(
 
@@ -444,7 +504,8 @@ class PayPalPayoutManager {
 
 
             const batchStatus =
-                batchHeader.batch_status || "PENDING";
+                batchHeader.batch_status ||
+                "PENDING";
 
 
             /*
@@ -453,7 +514,9 @@ class PayPalPayoutManager {
             ======================================
             */
 
-            let paypalItemId = "";
+            let paypalItemId =
+                "";
+
 
             if (
                 Array.isArray(data.items) &&
@@ -462,7 +525,8 @@ class PayPalPayoutManager {
 
                 paypalItemId =
                     data.items[0]
-                        ?.payout_item_id || "";
+                        ?.payout_item_id ||
+                    "";
             }
 
 
@@ -532,6 +596,7 @@ class PayPalPayoutManager {
             };
 
         }
+
         catch (error) {
 
             console.error(
@@ -542,6 +607,7 @@ class PayPalPayoutManager {
             let message =
                 error.message;
 
+
             let paypalResponse =
                 null;
 
@@ -551,10 +617,12 @@ class PayPalPayoutManager {
                 paypalResponse =
                     error.response.data;
 
+
                 console.error(
                     "PayPal HTTP:",
                     error.response.status
                 );
+
 
                 console.error(
                     "PayPal response:",
@@ -616,6 +684,20 @@ class PayPalPayoutManager {
     ==================================================
     GET PAYPAL PAYOUT STATUS
     ==================================================
+
+    This retrieves the complete PayPal payout batch.
+
+    We intentionally return the raw PayPal response
+    as well as normalized fields so that:
+
+        DENIED
+        FAILED
+        SUCCESS
+        COMPLETED
+        PROCESSING
+
+    can be diagnosed correctly.
+    ==================================================
     */
 
     async getPayoutStatus(
@@ -630,95 +712,271 @@ class PayPalPayoutManager {
         }
 
 
+        console.log(
+            "======================================"
+        );
+
+        console.log(
+            "PAYPAL PAYOUT STATUS"
+        );
+
+        console.log(
+            "======================================"
+        );
+
+        console.log(
+            "Batch ID:",
+            paypalBatchId
+        );
+
+
+        /*
+        ==========================================
+        GET ACCESS TOKEN
+        ==========================================
+        */
+
         const accessToken =
             await this.getAccessToken();
 
 
-        const response =
-            await axios.get(
+        /*
+        ==========================================
+        QUERY PAYPAL
+        ==========================================
+        */
 
-                `${this.getBaseUrl()}/v1/payments/payouts/${encodeURIComponent(paypalBatchId)}`,
+        try {
 
-                {
+            const response =
+                await axios.get(
 
-                    timeout:
-                        30000,
+                    `${this.getBaseUrl()}/v1/payments/payouts/${encodeURIComponent(paypalBatchId)}`,
 
-                    headers: {
+                    {
 
-                        Authorization:
-                            `Bearer ${accessToken}`,
+                        timeout:
+                            30000,
 
-                        "Content-Type":
-                            "application/json"
+                        headers: {
+
+                            Authorization:
+                                `Bearer ${accessToken}`,
+
+                            "Content-Type":
+                                "application/json"
+                        }
                     }
-                }
+                );
+
+
+            const data =
+                response.data || {};
+
+
+            /*
+            ==========================================
+            LOG COMPLETE PAYPAL RESPONSE
+            ==========================================
+            */
+
+            console.log(
+                "PAYPAL RAW STATUS:"
             );
 
 
-        const data =
-            response.data || {};
+            console.log(
+                JSON.stringify(
+                    data,
+                    null,
+                    2
+                )
+            );
 
 
-        const batchHeader =
-            data.batch_header || {};
+            /*
+            ==========================================
+            BATCH HEADER
+            ==========================================
+            */
+
+            const batchHeader =
+                data.batch_header || {};
 
 
-        const batchStatus =
-            batchHeader.batch_status || "";
+            const batchStatus =
+                String(
+                    batchHeader.batch_status || ""
+                )
+                    .trim()
+                    .toUpperCase();
 
 
-        let itemStatus =
-            "";
+            const senderBatchId =
+                batchHeader
+                    .sender_batch_header
+                    ?.sender_batch_id ||
+                "";
 
 
-        let paypalItemId =
-            "";
+            /*
+            ==========================================
+            PAYPAL ITEMS
+            ==========================================
+            */
+
+            const items =
+                Array.isArray(data.items)
+                    ? data.items
+                    : [];
 
 
-        let transactionId =
-            "";
+            let paypalItemId =
+                "";
 
 
-        if (
-            Array.isArray(data.items) &&
-            data.items.length > 0
-        ) {
+            let transactionId =
+                "";
 
-            const item =
-                data.items[0];
 
-            paypalItemId =
-                item.payout_item_id || "";
+            let transactionStatus =
+                "";
 
-            transactionId =
-                item.transaction_id || "";
 
-            itemStatus =
-                item.transaction_status || "";
+            let itemErrors =
+                null;
+
+
+            let payoutItem =
+                null;
+
+
+            if (items.length > 0) {
+
+                const item =
+                    items[0];
+
+
+                paypalItemId =
+                    item.payout_item_id ||
+                    "";
+
+
+                transactionId =
+                    item.transaction_id ||
+                    "";
+
+
+                transactionStatus =
+                    String(
+                        item.transaction_status || ""
+                    )
+                        .trim()
+                        .toUpperCase();
+
+
+                itemErrors =
+                    item.errors ||
+                    null;
+
+
+                payoutItem =
+                    item.payout_item ||
+                    null;
+            }
+
+
+            /*
+            ==========================================
+            BATCH-LEVEL ERRORS
+            ==========================================
+            */
+
+            const batchErrors =
+                batchHeader.errors ||
+                data.errors ||
+                null;
+
+
+            /*
+            ==========================================
+            RETURN NORMALIZED + RAW DATA
+            ==========================================
+            */
+
+            return {
+
+                success:
+                    true,
+
+                paypalBatchId:
+                    batchHeader.payout_batch_id ||
+                    paypalBatchId,
+
+                batchStatus,
+
+                senderBatchId,
+
+                paypalItemId,
+
+                transactionId,
+
+                transactionStatus,
+
+                batchErrors,
+
+                itemErrors,
+
+                payoutItem,
+
+                items,
+
+                /*
+                Complete original PayPal response.
+                */
+
+                data
+            };
+
         }
 
+        catch (error) {
 
-        return {
+            console.error(
+                "PayPal payout status request failed."
+            );
 
-            success:
-                true,
 
-            paypalBatchId,
+            if (error.response) {
 
-            batchStatus,
+                console.error(
+                    "PayPal status HTTP:",
+                    error.response.status
+                );
 
-            itemStatus,
 
-            paypalItemId,
+                console.error(
+                    "PayPal status response:",
+                    JSON.stringify(
+                        error.response.data,
+                        null,
+                        2
+                    )
+                );
+            }
 
-            transactionId,
 
-            data
-        };
+            throw error;
+        }
     }
 }
 
+
+/*
+====================================================
+EXPORT SINGLE MANAGER INSTANCE
+====================================================
+*/
 
 module.exports =
     new PayPalPayoutManager();
