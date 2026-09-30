@@ -451,27 +451,28 @@ router.get(
             */
 
             const withdrawalSnapshot =
-                await db
-                    .ref("withdrawalRequests")
-                    .orderByChild("paypalBatchId")
-                    .equalTo(paypalBatchId)
-                    .get();
+    await db
+        .ref("withdrawalRequests")
+        .get();
 
+let withdrawalId = null;
+let withdrawal = null;
 
-            let withdrawalId = null;
-            let withdrawal = null;
+withdrawalSnapshot.forEach(child => {
 
+    const data = child.val();
 
-            withdrawalSnapshot.forEach(child => {
+    if (
+        data &&
+        String(data.paypalBatchId || "") ===
+        String(paypalBatchId)
+    ) {
 
-                withdrawalId =
-                    child.key;
+        withdrawalId = child.key;
+        withdrawal = data;
+    }
 
-                withdrawal =
-                    child.val();
-
-            });
-
+});
 
             /*
             ==========================================
