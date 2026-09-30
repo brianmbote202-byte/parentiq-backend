@@ -6,7 +6,14 @@ const DashboardCache =
 const DashboardBuilder =
     require("../cache/DashboardBuilder");
 
+const {
+    getUsdToKesRate,
+    kesToUsd
+} = require("../services/CurrencyService");
+
+
 class DashboardManager {
+
 
     /*
     ==========================================
@@ -22,20 +29,9 @@ class DashboardManager {
         --------------------------------------
         */
 
-        const cached =
+        let cachedDashboard =
             DashboardCache.get(agentId);
 
-        if (cached) {
-
-            console.log("✅ Dashboard Cache HIT");
-
-            return cached;
-
-        }
-
-        console.log("❌ Dashboard Cache MISS");
-
-        console.time("dashboard");
 
         /*
         --------------------------------------
@@ -43,60 +39,240 @@ class DashboardManager {
         --------------------------------------
         */
 
-        const snapshot = await db
-            .ref("agent_dashboard_cache")
-            .child(agentId)
-            .get();
-
-        /*
-        --------------------------------------
-        CACHE DOESN'T EXIST
-        --------------------------------------
-        */
-
-        if (!snapshot.exists()) {
+        if (!cachedDashboard) {
 
             console.log(
-                "Dashboard cache missing. Building..."
+                "❌ Dashboard Cache MISS"
             );
 
-            const dashboard =
-                await DashboardBuilder.rebuild(agentId);
+
+            const snapshot =
+                await db
+                    .ref("agent_dashboard_cache")
+                    .child(agentId)
+                    .get();
+
+
+            /*
+            ----------------------------------
+            CACHE DOESN'T EXIST
+            ----------------------------------
+            */
+
+            if (!snapshot.exists()) {
+
+                console.log(
+                    "Dashboard cache missing. Building..."
+                );
+
+
+                cachedDashboard =
+                    await DashboardBuilder.rebuild(
+                        agentId
+                    );
+
+            }
+
+            else {
+
+                cachedDashboard =
+                    snapshot.val();
+
+
+                console.log(
+                    "💾 Dashboard loaded from Firebase cache"
+                );
+
+            }
+
+
+            /*
+            ----------------------------------
+            SAVE PURE KES DASHBOARD
+            ----------------------------------
+            */
 
             DashboardCache.set(
                 agentId,
-                dashboard
+                cachedDashboard
             );
-
-            console.timeEnd("dashboard");
-
-            return dashboard;
 
         }
 
+        else {
+
+            console.log(
+                "✅ Dashboard Cache HIT"
+            );
+
+        }
+
+
         /*
-        --------------------------------------
-        LOAD CACHE
-        --------------------------------------
+        ======================================
+        CREATE RESPONSE COPY
+        ======================================
+
+        IMPORTANT:
+
+        Never modify the cached dashboard.
+
+        Firebase / memory cache remains KES-only.
+        ======================================
         */
 
-        const dashboard =
-            snapshot.val();
+        const dashboard = {
+
+            ...cachedDashboard,
+
+            wallet: {
+                ...(cachedDashboard.wallet || {})
+            }
+
+        };
+
 
         /*
-        --------------------------------------
-        SAVE MEMORY CACHE
-        --------------------------------------
+        ======================================
+        ADD CURRENT USD DISPLAY VALUES
+        ======================================
         */
 
-        DashboardCache.set(
-            agentId,
-            dashboard
-        );
+        try {
 
-        console.log("💾 Dashboard loaded from Firebase cache");
+            const fx =
+                await getUsdToKesRate();
 
-        console.timeEnd("dashboard");
+
+            const wallet =
+                dashboard.wallet;
+
+
+            const available =
+                Number(
+                    wallet.available || 0
+                );
+
+
+            const pending =
+                Number(
+                    wallet.pending || 0
+                );
+
+
+            const totalWithdrawn =
+                Number(
+                    wallet.totalWithdrawn || 0
+                );
+
+
+            /*
+            ----------------------------------
+            KES → USD
+            ----------------------------------
+            */
+
+            dashboard.wallet = {
+
+                ...wallet,
+
+
+                availableUSD:
+                    kesToUsd(
+                        available,
+                        fx.rate
+                    ),
+
+
+                pendingUSD:
+                    kesToUsd(
+                        pending,
+                        fx.rate
+                    ),
+
+
+                totalWithdrawnUSD:
+                    kesToUsd(
+                        totalWithdrawn,
+                        fx.rate
+                    ),
+
+
+                currency:
+                    "KES",
+
+
+                displayCurrency:
+                    "USD",
+
+
+                fxRate:
+                    fx.rate,
+
+
+                fxDate:
+                    fx.date,
+
+
+                fxProvider:
+                    fx.provider,
+
+
+                fxUnavailable:
+                    false
+
+            };
+
+        }
+
+
+        catch (error) {
+
+            /*
+            ==================================
+            FX FAILURE
+            ==================================
+
+            Never break the dashboard simply
+            because the external FX provider
+            is unavailable.
+
+            KES values remain available.
+            ==================================
+            */
+
+            console.error(
+                "⚠️ USD conversion failed:",
+                error.message
+            );
+
+
+            dashboard.wallet = {
+
+                ...(dashboard.wallet || {}),
+
+
+                currency:
+                    "KES",
+
+
+                displayCurrency:
+                    "USD",
+
+
+                fxUnavailable:
+                    true
+
+            };
+
+        }
+
+
+        /*
+        ======================================
+        RETURN RESPONSE
+        ======================================
+        */
 
         return dashboard;
 
@@ -104,4 +280,6 @@ class DashboardManager {
 
 }
 
-module.exports = new DashboardManager();
+
+module.exports =
+    new DashboardManager();

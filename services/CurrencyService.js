@@ -3,7 +3,26 @@ const https = require("https");
 const FX_API =
     "https://api.frankfurter.dev/v2/rate/USD/KES?providers=cbk";
 
-async function getUsdToKesRate() {
+
+/*
+==========================================
+FX CACHE
+==========================================
+*/
+
+const FX_CACHE_DURATION =
+    15 * 60 * 1000; // 15 minutes
+
+let cachedFx = null;
+
+
+/*
+==========================================
+FETCH USD/KES RATE
+==========================================
+*/
+
+async function fetchUsdToKesRate() {
 
     return new Promise((resolve, reject) => {
 
@@ -18,6 +37,7 @@ async function getUsdToKesRate() {
                 response.on("data", chunk => {
                     data += chunk;
                 });
+
 
                 response.on("end", () => {
 
@@ -36,11 +56,14 @@ async function getUsdToKesRate() {
 
                         }
 
+
                         const result =
                             JSON.parse(data);
 
+
                         const rate =
                             Number(result.rate);
+
 
                         if (
                             !Number.isFinite(rate) ||
@@ -55,6 +78,24 @@ async function getUsdToKesRate() {
 
                         }
 
+
+                        const fx = {
+
+                            rate,
+
+                            date:
+                                result.date ||
+                                null,
+
+                            provider:
+                                "CBK",
+
+                            fetchedAt:
+                                Date.now()
+
+                        };
+
+
                         console.log(
                             "================================"
                         );
@@ -65,35 +106,25 @@ async function getUsdToKesRate() {
 
                         console.log(
                             "Provider:",
-                            "CBK"
+                            fx.provider
                         );
 
                         console.log(
                             "Date:",
-                            result.date
+                            fx.date
                         );
 
                         console.log(
                             "Rate:",
-                            rate
+                            fx.rate
                         );
 
                         console.log(
                             "================================"
                         );
 
-                        resolve({
 
-                            rate,
-
-                            date:
-                                result.date ||
-                                null,
-
-                            provider:
-                                "CBK"
-
-                        });
+                        resolve(fx);
 
                     }
 
@@ -109,6 +140,7 @@ async function getUsdToKesRate() {
 
         );
 
+
         request.on(
             "timeout",
             () => {
@@ -121,6 +153,7 @@ async function getUsdToKesRate() {
 
             }
         );
+
 
         request.on(
             "error",
@@ -136,6 +169,108 @@ async function getUsdToKesRate() {
 }
 
 
+/*
+==========================================
+GET USD/KES RATE
+==========================================
+
+Uses a 15-minute memory cache.
+
+This prevents every dashboard request
+from calling the external FX provider.
+==========================================
+*/
+
+async function getUsdToKesRate() {
+
+    const now =
+        Date.now();
+
+
+    /*
+    --------------------------------------
+    CACHE HIT
+    --------------------------------------
+    */
+
+    if (
+        cachedFx &&
+        now - cachedFx.fetchedAt <
+            FX_CACHE_DURATION
+    ) {
+
+        console.log(
+            "💱 FX CACHE HIT:",
+            cachedFx.rate
+        );
+
+        return cachedFx;
+
+    }
+
+
+    /*
+    --------------------------------------
+    CACHE MISS
+    --------------------------------------
+    */
+
+    console.log(
+        "💱 FX CACHE MISS - fetching rate"
+    );
+
+
+    try {
+
+        const fx =
+            await fetchUsdToKesRate();
+
+
+        cachedFx =
+            fx;
+
+
+        return fx;
+
+    }
+
+    catch (error) {
+
+        /*
+        ----------------------------------
+        FALLBACK
+        ----------------------------------
+
+        If the API fails but we have a
+        previous successful rate, continue
+        using it.
+        ----------------------------------
+        */
+
+        if (cachedFx) {
+
+            console.warn(
+                "⚠️ FX provider failed. Using previous cached rate."
+            );
+
+            return cachedFx;
+
+        }
+
+
+        throw error;
+
+    }
+
+}
+
+
+/*
+==========================================
+USD → KES
+==========================================
+*/
+
 function usdToKes(
     usdAmount,
     rate
@@ -144,12 +279,14 @@ function usdToKes(
     const usd =
         Number(usdAmount);
 
+
     const fxRate =
         Number(rate);
 
+
     if (
         !Number.isFinite(usd) ||
-        usd <= 0
+        usd < 0
     ) {
 
         throw new Error(
@@ -157,6 +294,7 @@ function usdToKes(
         );
 
     }
+
 
     if (
         !Number.isFinite(fxRate) ||
@@ -169,8 +307,59 @@ function usdToKes(
 
     }
 
+
     return Math.round(
         usd * fxRate
+    );
+
+}
+
+
+/*
+==========================================
+KES → USD
+==========================================
+*/
+
+function kesToUsd(
+    kesAmount,
+    rate
+) {
+
+    const kes =
+        Number(kesAmount);
+
+
+    const fxRate =
+        Number(rate);
+
+
+    if (
+        !Number.isFinite(kes) ||
+        kes < 0
+    ) {
+
+        throw new Error(
+            "Invalid KES amount"
+        );
+
+    }
+
+
+    if (
+        !Number.isFinite(fxRate) ||
+        fxRate <= 0
+    ) {
+
+        throw new Error(
+            "Invalid USD/KES exchange rate"
+        );
+
+    }
+
+
+    return Number(
+        (kes / fxRate).toFixed(2)
     );
 
 }
@@ -180,6 +369,8 @@ module.exports = {
 
     getUsdToKesRate,
 
-    usdToKes
+    usdToKes,
+
+    kesToUsd
 
 };
