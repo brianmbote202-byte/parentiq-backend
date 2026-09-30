@@ -49,37 +49,67 @@ class PlanManager {
 
         const plan = await this.getPlan(planId);
 
-        return plan ? plan.price : null;
+        return plan ? Number(plan.price) : null;
     }
 
     async getCommission(planId) {
 
         const plan = await this.getPlan(planId);
 
-        return plan ? plan.agentCommission : null;
+        return plan ? Number(plan.agentCommission) : null;
     }
 
     async getDuration(planId) {
 
         const plan = await this.getPlan(planId);
 
-        return plan ? plan.durationDays : null;
+        return plan ? Number(plan.durationDays) : null;
     }
 
     async getMaxChildren(planId) {
 
         const plan = await this.getPlan(planId);
 
-        return plan ? plan.maxChildren : null;
+        return plan ? Number(plan.maxChildren) : null;
     }
 
     async getMaxDevicesPerChild(planId) {
 
         const plan = await this.getPlan(planId);
 
-        return plan ? plan.maxDevicesPerChild : null;
+        return plan ? Number(plan.maxDevicesPerChild) : null;
     }
 
+    // -----------------------------------------
+    // PAYMENT PRICING
+    // -----------------------------------------
+
+    async getPricing(planId) {
+
+        const plan = await this.getPlan(planId);
+
+        if (!plan) {
+            return null;
+        }
+
+        return {
+            planId,
+            planName: plan.name || planId,
+
+            // Master/base price stored in Firebase
+            baseAmount: Number(plan.price),
+            baseCurrency: "KES",
+
+            durationDays:
+                Number(plan.durationDays || 30),
+
+            active:
+                plan.active === true,
+
+            agentCommission:
+                Number(plan.agentCommission || 0)
+        };
+    }
 }
 
 module.exports = new PlanManager();

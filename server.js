@@ -7,6 +7,12 @@ const CommissionManager = require("./commissions/CommissionManager");
 
 const crypto = require("crypto");
 
+//==========currency exchange========
+const {
+    getUsdToKesRate,
+    usdToKes
+} = require("./services/CurrencyService");
+
 //=======PAYPAL========
 const PayPalManager =
     require("./payments/PayPalManager");
@@ -734,6 +740,90 @@ app.get("/", (req, res) => {
 
             });
         }
+        // ==================================================
+// GET CURRENT USD/KES EXCHANGE RATE
+// ==================================================
+
+let fxRate = null;
+let usdAmount = null;
+let fxDate = null;
+let fxProvider = null;
+
+try {
+
+    const fx =
+        await getUsdToKesRate();
+
+    fxRate =
+        Number(fx.rate);
+
+    fxDate =
+        fx.date || null;
+
+    fxProvider =
+        fx.provider || null;
+
+    if (
+        Number.isFinite(fxRate) &&
+        fxRate > 0
+    ) {
+
+        usdAmount =
+            Number(
+                (planPrice / fxRate).toFixed(2)
+            );
+
+    }
+
+    console.log("================================");
+    console.log("PAYMENT CURRENCY CONVERSION");
+    console.log("================================");
+
+    console.log(
+        "Plan Amount KES:",
+        planPrice
+    );
+
+    console.log(
+        "USD/KES Rate:",
+        fxRate
+    );
+
+    console.log(
+        "USD Amount:",
+        usdAmount
+    );
+
+    console.log(
+        "FX Provider:",
+        fxProvider
+    );
+
+    console.log(
+        "FX Date:",
+        fxDate
+    );
+
+    console.log("================================");
+
+}
+catch (fxError) {
+
+    console.error(
+        "FX conversion failed:",
+        fxError.message
+    );
+
+    /*
+     * M-Pesa must still work even if
+     * the FX provider temporarily fails.
+     *
+     * The actual M-Pesa charge remains KES.
+     */
+
+    fxRate = null;
+    usdAmount = null;
+}
 
 
         // ==================================================
@@ -918,43 +1008,58 @@ app.get("/", (req, res) => {
         // ==================================================
 
         await db
-            .ref(`transactions/${checkoutId}`)
-            .set({
+    .ref(`transactions/${checkoutId}`)
+    .set({
 
-                uid,
+        uid,
 
-                childId,
+        childId,
 
-                phone,
+        phone,
 
-                planId,
+        planId,
 
-                planName:
-                    plan.name,
+        planName:
+            plan.name,
 
-                /*
-                 * Store exactly the same amount
-                 * sent to M-Pesa.
-                 */
+        // Actual amount charged by M-Pesa
+        amount:
+            planPrice,
 
-                amount:
-                    planPrice,
+        // Currency actually charged
+        currency:
+            "KES",
 
-                status:
-                    "PENDING",
+        // USD equivalent shown to the customer
+        displayAmountUSD:
+            usdAmount,
 
-                processed:
-                    false,
+        displayCurrency:
+            "USD",
 
-                processing:
-                    false,
+        // Exchange-rate information
+        fxRate:
+            fxRate,
 
-                createdAt:
-                    now
+        fxProvider:
+            fxProvider,
 
-            });
+        fxDate:
+            fxDate,
 
+        status:
+            "PENDING",
 
+        processed:
+            false,
+
+        processing:
+            false,
+
+        createdAt:
+            now
+
+    });
         // ==================================================
         // UPDATE CHILD BILLING STATE
         // ==================================================
@@ -1024,11 +1129,38 @@ app.get("/", (req, res) => {
 
         return res.json({
 
-            success: true,
+    success: true,
 
-            data: response
+    data: response,
 
-        });
+    pricing: {
+
+        planId,
+
+        planName:
+            plan.name,
+
+        amountKES:
+            planPrice,
+
+        amountUSD:
+            usdAmount,
+
+        chargeCurrency:
+            "KES",
+
+        displayCurrency:
+            "USD",
+
+        fxRate,
+
+        fxProvider,
+
+        fxDate
+
+    }
+
+});
 
 
     } catch (error) {
@@ -6927,6 +7059,134 @@ app.post("/paystack/webhook", async (req, res) => {
         return res.sendStatus(200);
     }
 
+});
+
+// ============================================================
+// LIVE PRICING
+// ============================================================
+
+app.get("/pricing", async (req, res) => {
+
+    try {
+
+        const plans =
+            await PlanManager.getAllPlans();
+
+        const fx =
+            await getUsdToKesRate();
+
+        const rate =
+            Number(fx.rate);
+
+        if (
+            !Number.isFinite(rate) ||
+            rate <= 0
+        ) {
+            throw new Error(
+                "Invalid USD/KES exchange rate"
+            );
+        }
+
+        const result = {};
+
+        for (const planId of ["premium", "family"]) {
+
+            const plan =
+                plans[planId];
+
+            if (!plan) {
+                continue;
+            }
+
+            const amountKES =
+                Number(plan.price);
+
+            if (
+                !Number.isFinite(amountKES) ||
+                amountKES <= 0
+            ) {
+                continue;
+            }
+
+            const oldAmountKES =
+                Number(
+                    plan.oldPrice ||
+                    plan.originalPrice ||
+                    0
+                );
+
+            const amountUSD =
+                Number(
+                    (amountKES / rate).toFixed(2)
+                );
+
+            const oldAmountUSD =
+                oldAmountKES > 0
+                    ? Number(
+                        (
+                            oldAmountKES /
+                            rate
+                        ).toFixed(2)
+                    )
+                    : null;
+
+            result[planId] = {
+
+                planId,
+
+                name:
+                    plan.name ||
+                    planId,
+
+                amountKES,
+
+                amountUSD,
+
+                oldAmountKES:
+                    oldAmountKES > 0
+                        ? oldAmountKES
+                        : null,
+
+                oldAmountUSD,
+
+                currencyKES:
+                    "KES",
+
+                currencyUSD:
+                    "USD"
+            };
+        }
+
+        return res.json({
+
+            success: true,
+
+            fx: {
+                rate,
+                provider:
+                    fx.provider || null,
+                date:
+                    fx.date || null
+            },
+
+            plans: result
+        });
+
+    } catch (error) {
+
+        console.error(
+            "Pricing endpoint error:",
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to retrieve current pricing."
+        });
+    }
 });
 
 const server = app.listen(PORT, () => {
