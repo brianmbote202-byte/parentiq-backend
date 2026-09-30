@@ -1,5 +1,7 @@
 const { db } = require("../firebase");
-const ActivityManager = require("../activity/ActivityManager");
+
+const ActivityManager =
+    require("../activity/ActivityManager");
 
 const MIN_WITHDRAWAL = 200;
 const MAX_WITHDRAWAL = 50000;
@@ -15,632 +17,1144 @@ const LedgerDirection =
 
 const LedgerCategory =
     require("../finance/LedgerCategory");
-/*const DashboardCache =
-    require("../cache/DashboardCache");*/
 
 const CacheManager =
-    require("../cache/CacheManager");    
+    require("../cache/CacheManager");
 
 const PaymentManager =
-    require("../payments/PaymentManager");    
+    require("../payments/PaymentManager");
 
 
 class WithdrawalManager {
 
     /*
-    ================================================
+    ==================================================
     REQUEST WITHDRAWAL
-    ================================================
+    ==================================================
     */
 
     async requestWithdrawal({
-
         agentId,
         amount,
         phone,
         paymentMethod = "MPESA",
-        paypalEmail = ""
-
+        paypalEmail = "",
+        payoutAmount = 0,
+        payoutCurrency = "USD"
     }) {
 
         amount = Number(amount);
 
         paymentMethod =
-    String(paymentMethod || "MPESA")
-        .trim()
-        .toUpperCase();
+            String(paymentMethod || "MPESA")
+                .trim()
+                .toUpperCase();
 
-paypalEmail =
-    String(paypalEmail || "")
-        .trim()
-        .toLowerCase();
+        paypalEmail =
+            String(paypalEmail || "")
+                .trim()
+                .toLowerCase();
 
-//=====================VALIDATION===================
-if (
-    paymentMethod !== "MPESA" &&
-    paymentMethod !== "PAYPAL"
-) {
-    throw new Error(
-        "Unsupported payment method."
-    );
-}
+        payoutAmount =
+            Number(payoutAmount || 0);
 
-if (
-    paymentMethod === "MPESA" &&
-    !phone
-) {
-    throw new Error(
-        "M-Pesa phone number is required."
-    );
-}
-
-if (
-    paymentMethod === "PAYPAL"
-) {
-
-    if (!paypalEmail) {
-        throw new Error(
-            "PayPal email is required."
-        );
-    }
-
-    const paypalEmailRegex =
-        /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-    if (!paypalEmailRegex.test(paypalEmail)) {
-        throw new Error(
-            "Invalid PayPal email address."
-        );
-    }
-}
+        payoutCurrency =
+            String(payoutCurrency || "USD")
+                .trim()
+                .toUpperCase();
 
 
-        if (isNaN(amount) || amount <= 0) {
-            throw new Error("Invalid withdrawal amount.");
+        /*
+        ==================================================
+        VALIDATION
+        ==================================================
+        */
+
+        if (
+            paymentMethod !== "MPESA" &&
+            paymentMethod !== "PAYPAL"
+        ) {
+            throw new Error(
+                "Unsupported payment method."
+            );
         }
 
-        if (amount < MIN_WITHDRAWAL) {
+
+        /*
+        ==================================================
+        M-PESA VALIDATION
+        ==================================================
+        */
+
+        if (
+            paymentMethod === "MPESA" &&
+            !phone
+        ) {
+            throw new Error(
+                "M-Pesa phone number is required."
+            );
+        }
+
+
+        /*
+        ==================================================
+        PAYPAL VALIDATION
+        ==================================================
+        */
+
+        if (
+            paymentMethod === "PAYPAL"
+        ) {
+
+            if (!paypalEmail) {
+                throw new Error(
+                    "PayPal email is required."
+                );
+            }
+
+            const paypalEmailRegex =
+                /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+            if (
+                !paypalEmailRegex.test(
+                    paypalEmail
+                )
+            ) {
+                throw new Error(
+                    "Invalid PayPal email address."
+                );
+            }
+
+            /*
+            PayPal payout amount must be
+            provided before the payment is sent.
+            */
+
+            if (
+                isNaN(payoutAmount) ||
+                payoutAmount <= 0
+            ) {
+                throw new Error(
+                    "PayPal payout amount is required."
+                );
+            }
+
+            if (!payoutCurrency) {
+                throw new Error(
+                    "PayPal payout currency is required."
+                );
+            }
+        }
+
+
+        /*
+        ==================================================
+        AMOUNT VALIDATION
+        ==================================================
+        */
+
+        if (
+            isNaN(amount) ||
+            amount <= 0
+        ) {
+            throw new Error(
+                "Invalid withdrawal amount."
+            );
+        }
+
+
+        if (
+            amount < MIN_WITHDRAWAL
+        ) {
             throw new Error(
                 `Minimum withdrawal is KES ${MIN_WITHDRAWAL}.`
             );
         }
 
-        if (amount > MAX_WITHDRAWAL) {
+
+        if (
+            amount > MAX_WITHDRAWAL
+        ) {
             throw new Error(
                 `Maximum withdrawal is KES ${MAX_WITHDRAWAL}.`
             );
         }
 
-        const agentRef = db
-            .ref("agents")
-            .child(agentId);
 
-        const snapshot = await agentRef.get();
+        /*
+        ==================================================
+        LOAD AGENT
+        ==================================================
+        */
+
+        const agentRef =
+            db
+                .ref("agents")
+                .child(agentId);
+
+        const snapshot =
+            await agentRef.get();
 
         if (!snapshot.exists()) {
-            throw new Error("Agent not found.");
+            throw new Error(
+                "Agent not found."
+            );
         }
 
-        const agent = snapshot.val();
+        const agent =
+            snapshot.val();
 
-        const balance = Number(agent.commissionBalance || 0);
-        const pending = Number(agent.pendingWithdrawals || 0);
 
-        if (await this.pendingWithdrawalExists(agentId)) {
+        const balance =
+            Number(
+                agent.commissionBalance || 0
+            );
 
-    throw new Error(
-        "You already have a pending withdrawal."
-    );
+        const pending =
+            Number(
+                agent.pendingWithdrawals || 0
+            );
 
-}
 
-        if (balance < amount) {
+        /*
+        ==================================================
+        PREVENT DUPLICATE WITHDRAWAL
+        ==================================================
+        */
+
+        if (
+            await this.pendingWithdrawalExists(
+                agentId
+            )
+        ) {
+            throw new Error(
+                "You already have a pending withdrawal."
+            );
+        }
+
+
+        /*
+        ==================================================
+        BALANCE VALIDATION
+        ==================================================
+        */
+
+        if (
+            balance < amount
+        ) {
             throw new Error(
                 "Insufficient commission balance."
             );
         }
 
-        const withdrawalRef = db
-            .ref("withdrawalRequests")
-            .push();
+
+        /*
+        ==================================================
+        CREATE WITHDRAWAL
+        ==================================================
+        */
+
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .push();
+
 
         const reference =
-        await this.generateWithdrawalReference();    
+            await this.generateWithdrawalReference();
 
-        const now = Date.now();
+
+        const now =
+            Date.now();
+
+
+        /*
+        Stable PayPal sender batch ID.
+
+        IMPORTANT:
+        This must not use Date.now()
+        because retries could create duplicate
+        PayPal payouts.
+        */
+
+        const paypalSenderBatchId =
+            paymentMethod === "PAYPAL"
+                ? `PARENTIQ-${withdrawalRef.key}`
+                : "";
+
 
         const withdrawal = {
 
-    id: withdrawalRef.key,
+            id:
+                withdrawalRef.key,
 
-    reference,
+            reference,
 
-    agentId,
+            agentId,
 
-    agentName: agent.fullName || "",
+            agentName:
+                agent.fullName || "",
 
-    paymentMethod,
 
-    paypalEmail,
+            /*
+            ==================================================
+            PAYMENT METHOD
+            ==================================================
+            */
 
-    phone,
+            paymentMethod,
 
-    amount,
+            phone:
+                phone || "",
 
-    availableBalanceBefore: balance,
+            paypalEmail:
+                paypalEmail || "",
 
-    status: "pending",
 
-    requestedAt: now,
+            /*
+            ==================================================
+            ACCOUNTING AMOUNT
+            ==================================================
 
-    approvedAt: null,
+            This remains the agent's commission
+            amount in KES.
+            */
 
-    rejectedAt: null,
+            amount,
 
-    paidAt: null,
 
-    approvedBy: "",
+            /*
+            ==================================================
+            PAYPAL PAYOUT
+            ==================================================
 
-    approvedById: "",
+            payoutAmount is the amount actually sent
+            through PayPal.
 
-    approvedByName: "",
+            Example:
 
-    rejectionReason: "",
+            amount = KES 200
+            payoutAmount = USD 2.00
 
-    createdAt: now,
+            The conversion should eventually be
+            calculated by the backend using your
+            configured FX rate.
+            */
 
-    updatedAt: now,
+            payoutAmount:
+                paymentMethod === "PAYPAL"
+                    ? payoutAmount
+                    : 0,
 
-    mpesaReceipt: "",
+            payoutCurrency:
+                paymentMethod === "PAYPAL"
+                    ? payoutCurrency
+                    : "KES",
 
-    paymentStatus: "NOT_SENT",
+            paypalSenderBatchId,
 
-paymentAttemptedAt: null,
 
-paymentCompletedAt: null,
+            /*
+            ==================================================
+            BALANCE
+            ==================================================
+            */
 
-paymentFailedAt: null,
+            availableBalanceBefore:
+                balance,
 
-paymentFailureReason: "",
 
-paymentReference: ""
+            /*
+            ==================================================
+            STATUS
+            ==================================================
+            */
 
-};
-        await withdrawalRef.set(withdrawal);
+            status:
+                "pending",
+
+
+            requestedAt:
+                now,
+
+            approvedAt:
+                null,
+
+            rejectedAt:
+                null,
+
+            paidAt:
+                null,
+
+
+            /*
+            ==================================================
+            ADMIN
+            ==================================================
+            */
+
+            approvedBy:
+                "",
+
+            approvedById:
+                "",
+
+            approvedByName:
+                "",
+
+
+            rejectionReason:
+                "",
+
+
+            /*
+            ==================================================
+            PAYMENT TRACKING
+            ==================================================
+            */
+
+            paymentStatus:
+                "NOT_SENT",
+
+            paymentAttemptedAt:
+                null,
+
+            paymentCompletedAt:
+                null,
+
+            paymentFailedAt:
+                null,
+
+            paymentFailureReason:
+                "",
+
+            paymentReference:
+                "",
+
+
+            /*
+            ==================================================
+            M-PESA
+            ==================================================
+            */
+
+            mpesaReceipt:
+                "",
+
+            conversationId:
+                "",
+
+            originatorConversationId:
+                "",
+
+
+            /*
+            ==================================================
+            PAYPAL
+            ==================================================
+            */
+
+            paypalBatchId:
+                "",
+
+            paypalItemId:
+                "",
+
+            paypalTransactionId:
+                "",
+
+
+            /*
+            ==================================================
+            TIMESTAMPS
+            ==================================================
+            */
+
+            createdAt:
+                now,
+
+            updatedAt:
+                now
+        };
+
 
         /*
-==========================================
-FINANCIAL LEDGER
-==========================================
-*/
+        ==================================================
+        SAVE WITHDRAWAL
+        ==================================================
+        */
 
-await LedgerManager.record({
+        await withdrawalRef.set(
+            withdrawal
+        );
 
-    type:
-        LedgerTypes.WITHDRAWAL_REQUESTED,
 
-    direction:
-        LedgerDirection.DEBIT,
+        /*
+        ==================================================
+        FINANCIAL LEDGER
+        ==================================================
+        */
 
-    category:
-        LedgerCategory.WITHDRAWAL,
+        await LedgerManager.record({
 
-    amount,
+            type:
+                LedgerTypes.WITHDRAWAL_REQUESTED,
 
-    reference:
-        reference,
+            direction:
+                LedgerDirection.DEBIT,
 
-    withdrawalId:
-        withdrawal.id,
+            category:
+                LedgerCategory.WITHDRAWAL,
 
-    agentId,
+            amount,
 
-    description:
-        "Withdrawal requested",
+            reference,
 
-    metadata: {
+            withdrawalId:
+                withdrawal.id,
 
-        phone,
+            agentId,
 
-        availableBalanceBefore: balance
+            description:
+                "Withdrawal requested",
 
-    }
+            metadata: {
 
-});
+                paymentMethod,
+
+                phone:
+                    phone || "",
+
+                paypalEmail:
+                    paypalEmail || "",
+
+                payoutAmount:
+                    paymentMethod === "PAYPAL"
+                        ? payoutAmount
+                        : 0,
+
+                payoutCurrency:
+                    paymentMethod === "PAYPAL"
+                        ? payoutCurrency
+                        : "KES",
+
+                availableBalanceBefore:
+                    balance
+            }
+        });
+
+
+        /*
+        ==================================================
+        UPDATE AGENT WALLET
+        ==================================================
+        */
 
         await agentRef.update({
 
-    commissionBalance: balance - amount,
+            commissionBalance:
+                balance - amount,
 
-    pendingWithdrawals: pending + amount
-
-});
-
-await CacheManager.refreshAgent(agentId);
+            pendingWithdrawals:
+                pending + amount
+        });
 
 
-      await ActivityManager.createWithdrawalActivity(
-    agentId,
-    {
-        withdrawalId: withdrawal.id,
-        reference: withdrawal.reference,
-        amount,
-        status: "REQUESTED"
-    }
-);
+        /*
+        ==================================================
+        REFRESH CACHE
+        ==================================================
+        */
+
+        await CacheManager.refreshAgent(
+            agentId
+        );
+
+
+        /*
+        ==================================================
+        ACTIVITY
+        ==================================================
+        */
+
+        await ActivityManager
+            .createWithdrawalActivity(
+                agentId,
+                {
+                    withdrawalId:
+                        withdrawal.id,
+
+                    reference:
+                        withdrawal.reference,
+
+                    amount,
+
+                    status:
+                        "REQUESTED"
+                }
+            );
+
+
+        /*
+        ==================================================
+        RETURN
+        ==================================================
+        */
 
         return {
 
-            success: true,
+            success:
+                true,
 
             withdrawal,
 
-            newBalance: balance - amount,
+            newBalance:
+                balance - amount,
 
-            pendingWithdrawals: pending + amount
-
+            pendingWithdrawals:
+                pending + amount
         };
-
     }
+
 
     /*
-    ================================================
-    APPROVE
-    ================================================
-    */
-async approveWithdrawal(
-    withdrawalId,
-    adminId = ""
-) {
-
-    const withdrawalRef = db
-        .ref("withdrawalRequests")
-        .child(withdrawalId);
-
-    const snapshot = await withdrawalRef.get();
-
-    if (!snapshot.exists()) {
-        throw new Error(
-            "Withdrawal request not found."
-        );
-    }
-
-    const withdrawal = snapshot.val();
-
-    if (withdrawal.status !== "pending") {
-        throw new Error(
-            "Withdrawal has already been processed."
-        );
-    }
-
-    /*
-    ==========================================
-    LOAD ADMIN DETAILS
-    ==========================================
-    */
-
-    let adminName = "Administrator";
-
-    if (adminId) {
-
-        const adminSnapshot = await db
-            .ref("admins")
-            .child(adminId)
-            .get();
-
-        if (adminSnapshot.exists()) {
-
-            const admin = adminSnapshot.val();
-
-            adminName =
-                admin.fullName ||
-                admin.name ||
-                admin.email ||
-                "Administrator";
-        }
-    }
-
-    /*
-    ==========================================
+    ==================================================
     APPROVE WITHDRAWAL
-    ==========================================
+    ==================================================
     */
 
-    await withdrawalRef.update({
-
-        status: "approved",
-
-        approvedAt: Date.now(),
-
-        approvedBy: adminName,
-
-        approvedById: adminId,
-
-        approvedByName: adminName,
-
-        updatedAt: Date.now()
-
-    });
-
-    await LedgerManager.record({
-
-    type:
-        LedgerTypes.WITHDRAWAL_APPROVED,
-
-    direction:
-        LedgerDirection.DEBIT,
-
-    category:
-        LedgerCategory.WITHDRAWAL,
-
-    amount:
-        withdrawal.amount,
-
-    reference:
-        withdrawal.reference,
-
-    withdrawalId,
-
-    agentId:
-        withdrawal.agentId,
-
-    description:
-        "Withdrawal approved",
-
-    metadata: {
-
-        approvedBy:
-            adminId
-
-    }
-
-});
-
-    /*
-    ==========================================
-    CREATE ACTIVITY
-    ==========================================
-    */
-
-    await ActivityManager.createWithdrawalActivity(
-    withdrawal.agentId,
-    {
+    async approveWithdrawal(
         withdrawalId,
-        reference: withdrawal.reference,
-        amount: withdrawal.amount,
-        status: "APPROVED"
-    }
-);
-
-    /*
-    ==========================================
-    REFRESH CACHE
-    ==========================================
-    */
-
-    await CacheManager.refreshAgent(
-        withdrawal.agentId
-    );
-
-    /*
-    ==========================================
-    RETURN
-    ==========================================
-    */
-
-    return {
-
-        success: true,
-
-        message: "Withdrawal approved."
-
-    };
-
-}
-
-/*
-==========================================
-MARK PROCESSING
-==========================================
-*/
-/*
-================================================
-MARK AS PROCESSING
-================================================
-*/
-
-async markProcessing(
-    withdrawalId,
-    conversationId,
-    originatorConversationId
-) {
-
-    /*
-    ==========================================
-    LOAD WITHDRAWAL
-    ==========================================
-    */
-
-    const withdrawalRef = db
-        .ref("withdrawalRequests")
-        .child(withdrawalId);
-
-    const snapshot =
-        await withdrawalRef.get();
-
-    if (!snapshot.exists()) {
-
-        throw new Error(
-            "Withdrawal request not found."
-        );
-
-    }
-
-    const withdrawal =
-        snapshot.val();
-
-    /*
-    ==========================================
-    VALIDATE STATUS
-    ==========================================
-    */
-
-    if (
-
-        withdrawal.status !== "approved" &&
-        withdrawal.status !== "payment_failed"
-
+        adminId = ""
     ) {
 
-        throw new Error(
-            "Withdrawal cannot be processed."
-        );
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .child(withdrawalId);
 
-    }
 
-    /*
-    ==========================================
-    UPDATE
-    ==========================================
-    */
+        const snapshot =
+            await withdrawalRef.get();
 
-    const now = Date.now();
 
-    await withdrawalRef.update({
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
 
-        status: "processing",
 
-        paymentStatus: "PROCESSING",
+        const withdrawal =
+            snapshot.val();
 
-        processingAt: now,
 
-        paymentAttemptedAt: now,
+        if (
+            withdrawal.status !== "pending"
+        ) {
+            throw new Error(
+                "Withdrawal has already been processed."
+            );
+        }
 
-        conversationId,
 
-        originatorConversationId,
+        /*
+        ==================================================
+        LOAD ADMIN DETAILS
+        ==================================================
+        */
 
-        updatedAt: now
+        let adminName =
+            "Administrator";
 
-    });
 
-    console.log(
-        "Withdrawal marked as PROCESSING:",
-        withdrawalId
-    );
+        if (adminId) {
 
-    return {
+            const adminSnapshot =
+                await db
+                    .ref("admins")
+                    .child(adminId)
+                    .get();
 
-        success: true,
 
-        message: "Withdrawal is processing."
+            if (adminSnapshot.exists()) {
 
-    };
+                const admin =
+                    adminSnapshot.val();
 
-}
-/*
-==========================================
-MARK PAYMENT FAILED
-==========================================
-*/
 
-async markPaymentFailed(
-
-    withdrawalId,
-
-    reason = ""
-
-) {
-
-    const withdrawalRef =
-        db.ref("withdrawalRequests")
-            .child(withdrawalId);
-
-    const snapshot =
-        await withdrawalRef.get();
-
-    if (!snapshot.exists()) {
-
-        throw new Error(
-            "Withdrawal request not found."
-        );
-
-    }
-
-    const withdrawal =
-        snapshot.val();
-
-    /*
-    ======================================
-    UPDATE WITHDRAWAL
-    ======================================
-    */
-
-    await withdrawalRef.update({
-
-        status:"payment_failed",
-
-        paymentFailedAt: Date.now(),
-
-        paymentFailureReason: reason,
-
-        updatedAt: Date.now()
-
-    });
-
-    /*
-    ======================================
-    ACTIVITY
-    ======================================
-    */
-
-    await ActivityManager
-        .createWithdrawalActivity(
-
-            withdrawal.agentId,
-
-            {
-
-                withdrawalId,
-
-                amount:
-                    withdrawal.amount,
-
-                status:
-                    "FAILED",
-
-                reason
-
+                adminName =
+                    admin.fullName ||
+                    admin.name ||
+                    admin.email ||
+                    "Administrator";
             }
+        }
 
+
+        /*
+        ==================================================
+        APPROVE
+        ==================================================
+        */
+
+        const now =
+            Date.now();
+
+
+        await withdrawalRef.update({
+
+            status:
+                "approved",
+
+            approvedAt:
+                now,
+
+            approvedBy:
+                adminName,
+
+            approvedById:
+                adminId,
+
+            approvedByName:
+                adminName,
+
+            updatedAt:
+                now
+        });
+
+
+        /*
+        ==================================================
+        LEDGER
+        ==================================================
+        */
+
+        await LedgerManager.record({
+
+            type:
+                LedgerTypes.WITHDRAWAL_APPROVED,
+
+            direction:
+                LedgerDirection.DEBIT,
+
+            category:
+                LedgerCategory.WITHDRAWAL,
+
+            amount:
+                withdrawal.amount,
+
+            reference:
+                withdrawal.reference,
+
+            withdrawalId,
+
+            agentId:
+                withdrawal.agentId,
+
+            description:
+                "Withdrawal approved",
+
+            metadata: {
+
+                approvedBy:
+                    adminId,
+
+                paymentMethod:
+                    withdrawal.paymentMethod ||
+                    "MPESA"
+            }
+        });
+
+
+        /*
+        ==================================================
+        ACTIVITY
+        ==================================================
+        */
+
+        await ActivityManager
+            .createWithdrawalActivity(
+                withdrawal.agentId,
+                {
+                    withdrawalId,
+
+                    reference:
+                        withdrawal.reference,
+
+                    amount:
+                        withdrawal.amount,
+
+                    status:
+                        "APPROVED"
+                }
+            );
+
+
+        /*
+        ==================================================
+        CACHE
+        ==================================================
+        */
+
+        await CacheManager.refreshAgent(
+            withdrawal.agentId
         );
 
+
+        return {
+
+            success:
+                true,
+
+            message:
+                "Withdrawal approved."
+        };
+    }
+
+
     /*
-    ======================================
-    REFRESH CACHE
-    ======================================
+    ==================================================
+    MARK M-PESA PROCESSING
+    ==================================================
     */
 
-    await CacheManager.refreshAgent(
+    async markProcessing(
+        withdrawalId,
+        conversationId,
+        originatorConversationId
+    ) {
 
-        withdrawal.agentId
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .child(withdrawalId);
 
-    );
 
-    return {
+        const snapshot =
+            await withdrawalRef.get();
 
-        success: true,
 
-        message:
-            "Withdrawal marked as failed."
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
 
-    };
 
-}
+        const withdrawal =
+            snapshot.val();
+
+
+        /*
+        ==================================================
+        ONLY M-PESA USES THIS METHOD
+        ==================================================
+        */
+
+        if (
+            withdrawal.paymentMethod === "PAYPAL"
+        ) {
+            throw new Error(
+                "Use markPayPalProcessing() for PayPal withdrawals."
+            );
+        }
+
+
+        /*
+        ==================================================
+        VALIDATE STATUS
+        ==================================================
+        */
+
+        if (
+            withdrawal.status !== "approved" &&
+            withdrawal.status !== "payment_failed"
+        ) {
+            throw new Error(
+                "Withdrawal cannot be processed."
+            );
+        }
+
+
+        const now =
+            Date.now();
+
+
+        await withdrawalRef.update({
+
+            status:
+                "processing",
+
+            paymentStatus:
+                "PROCESSING",
+
+            processingAt:
+                now,
+
+            paymentAttemptedAt:
+                now,
+
+            conversationId:
+                conversationId || "",
+
+            originatorConversationId:
+                originatorConversationId || "",
+
+            updatedAt:
+                now
+        });
+
+
+        console.log(
+            "M-Pesa withdrawal marked as PROCESSING:",
+            withdrawalId
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            message:
+                "Withdrawal is processing."
+        };
+    }
+
+
+    /*
+    ==================================================
+    MARK PAYPAL PROCESSING
+    ==================================================
+    */
+
+    async markPayPalProcessing(
+        withdrawalId,
+        paypalBatchId = "",
+        paypalItemId = ""
+    ) {
+
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .child(withdrawalId);
+
+
+        const snapshot =
+            await withdrawalRef.get();
+
+
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+
+        const withdrawal =
+            snapshot.val();
+
+
+        /*
+        ==================================================
+        VALIDATE PAYMENT METHOD
+        ==================================================
+        */
+
+        if (
+            withdrawal.paymentMethod !== "PAYPAL"
+        ) {
+            throw new Error(
+                "Withdrawal is not a PayPal withdrawal."
+            );
+        }
+
+
+        /*
+        ==================================================
+        VALIDATE STATUS
+        ==================================================
+        */
+
+        if (
+            withdrawal.status !== "approved" &&
+            withdrawal.status !== "payment_failed"
+        ) {
+            throw new Error(
+                "Withdrawal cannot be processed."
+            );
+        }
+
+
+        const now =
+            Date.now();
+
+
+        await withdrawalRef.update({
+
+            status:
+                "processing",
+
+            paymentStatus:
+                "PROCESSING",
+
+            processingAt:
+                now,
+
+            paymentAttemptedAt:
+                now,
+
+            paypalBatchId:
+                paypalBatchId || "",
+
+            paypalItemId:
+                paypalItemId || "",
+
+            updatedAt:
+                now
+        });
+
+
+        console.log(
+            "PayPal withdrawal marked as PROCESSING:",
+            withdrawalId
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            message:
+                "PayPal withdrawal is processing."
+        };
+    }
+
+
+    /*
+    ==================================================
+    MARK PAYMENT FAILED
+    ==================================================
+    */
+
+    async markPaymentFailed(
+        withdrawalId,
+        reason = ""
+    ) {
+
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .child(withdrawalId);
+
+
+        const snapshot =
+            await withdrawalRef.get();
+
+
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+
+        const withdrawal =
+            snapshot.val();
+
+
+        const now =
+            Date.now();
+
+
+        /*
+        ==================================================
+        UPDATE WITHDRAWAL
+        ==================================================
+        */
+
+        await withdrawalRef.update({
+
+            status:
+                "payment_failed",
+
+            paymentStatus:
+                "FAILED",
+
+            paymentFailedAt:
+                now,
+
+            paymentFailureReason:
+                reason,
+
+            updatedAt:
+                now
+        });
+
+
+        /*
+        ==================================================
+        ACTIVITY
+        ==================================================
+        */
+
+        await ActivityManager
+            .createWithdrawalActivity(
+                withdrawal.agentId,
+                {
+
+                    withdrawalId,
+
+                    reference:
+                        withdrawal.reference,
+
+                    amount:
+                        withdrawal.amount,
+
+                    status:
+                        "FAILED",
+
+                    reason
+                }
+            );
+
+
+        /*
+        ==================================================
+        CACHE
+        ==================================================
+        */
+
+        await CacheManager.refreshAgent(
+            withdrawal.agentId
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            message:
+                "Withdrawal marked as failed."
+        };
+    }
+
 
     /*
     ==================================================
     MARK WITHDRAWAL AS PAID
+    ==================================================
+
+    IMPORTANT:
+
+    For PayPal, this should only be called after
+    PayPal confirms the payout has completed.
+
+    Do NOT call this merely because PayPal accepted
+    the payout request.
     ==================================================
     */
 
@@ -655,8 +1169,10 @@ async markPaymentFailed(
                 .ref("withdrawalRequests")
                 .child(withdrawalId);
 
+
         const snapshot =
             await withdrawalRef.get();
+
 
         if (!snapshot.exists()) {
             throw new Error(
@@ -664,34 +1180,42 @@ async markPaymentFailed(
             );
         }
 
+
         const withdrawal =
             snapshot.val();
 
+
         /*
-        ==========================================
+        ==================================================
         PREVENT DUPLICATE COMPLETION
-        ==========================================
+        ==================================================
         */
 
-        if (withdrawal.status === "paid") {
+        if (
+            withdrawal.status === "paid"
+        ) {
 
             console.log(
                 "Withdrawal already marked as paid:",
                 withdrawalId
             );
 
+
             return {
-                success: true,
+
+                success:
+                    true,
+
                 message:
                     "Withdrawal already marked as paid."
             };
-
         }
 
+
         /*
-        ==========================================
+        ==================================================
         VALID PAYMENT STATES
-        ==========================================
+        ==================================================
         */
 
         if (
@@ -702,13 +1226,13 @@ async markPaymentFailed(
             throw new Error(
                 "Withdrawal cannot be marked as paid."
             );
-
         }
 
+
         /*
-        ==========================================
+        ==================================================
         LOAD AGENT
-        ==========================================
+        ==================================================
         */
 
         const agentRef =
@@ -716,42 +1240,49 @@ async markPaymentFailed(
                 .ref("agents")
                 .child(withdrawal.agentId);
 
+
         const agentSnapshot =
             await agentRef.get();
+
 
         if (!agentSnapshot.exists()) {
 
             throw new Error(
                 "Agent not found."
             );
-
         }
+
 
         const agent =
             agentSnapshot.val();
+
 
         const pending =
             Number(
                 agent.pendingWithdrawals || 0
             );
 
+
         const totalWithdrawn =
             Number(
                 agent.totalWithdrawn || 0
             );
+
 
         const amount =
             Number(
                 withdrawal.amount || 0
             );
 
+
         const now =
             Date.now();
 
+
         /*
-        ==========================================
+        ==================================================
         UPDATE WITHDRAWAL
-        ==========================================
+        ==================================================
         */
 
         await withdrawalRef.update({
@@ -769,20 +1300,29 @@ async markPaymentFailed(
                 now,
 
             mpesaReceipt:
-                receipt || "",
+                withdrawal.paymentMethod === "MPESA"
+                    ? receipt || ""
+                    : "",
 
             paymentReference:
-                providerReference || receipt || "",
+                providerReference ||
+                receipt ||
+                "",
+
+            paypalTransactionId:
+                withdrawal.paymentMethod === "PAYPAL"
+                    ? providerReference || ""
+                    : withdrawal.paypalTransactionId || "",
 
             updatedAt:
                 now
-
         });
 
+
         /*
-        ==========================================
+        ==================================================
         UPDATE AGENT WALLET
-        ==========================================
+        ==================================================
         */
 
         await agentRef.update({
@@ -795,13 +1335,13 @@ async markPaymentFailed(
 
             totalWithdrawn:
                 totalWithdrawn + amount
-
         });
 
+
         /*
-        ==========================================
+        ==================================================
         LEDGER
-        ==========================================
+        ==================================================
         */
 
         await LedgerManager.record({
@@ -838,23 +1378,32 @@ async markPaymentFailed(
 
                 paymentMethod:
                     withdrawal.paymentMethod ||
-                    "MPESA"
+                    "MPESA",
 
+                paypalBatchId:
+                    withdrawal.paypalBatchId ||
+                    "",
+
+                paypalItemId:
+                    withdrawal.paypalItemId ||
+                    "",
+
+                paypalTransactionId:
+                    withdrawal.paypalTransactionId ||
+                    ""
             }
-
         });
 
+
         /*
-        ==========================================
+        ==================================================
         ACTIVITY
-        ==========================================
+        ==================================================
         */
 
         await ActivityManager
             .createWithdrawalActivity(
-
                 withdrawal.agentId,
-
                 {
 
                     withdrawalId,
@@ -869,29 +1418,31 @@ async markPaymentFailed(
 
                     receipt:
                         receipt || ""
-
                 }
-
             );
 
+
         /*
-        ==========================================
-        REFRESH CACHE
-        ==========================================
+        ==================================================
+        CACHE
+        ==================================================
         */
 
         await CacheManager.refreshAgent(
             withdrawal.agentId
         );
 
+
         console.log(
             "Withdrawal marked as PAID:",
             withdrawalId
         );
 
+
         return {
 
-            success: true,
+            success:
+                true,
 
             message:
                 "Withdrawal marked as paid.",
@@ -905,387 +1456,682 @@ async markPaymentFailed(
 
             providerReference:
                 providerReference || ""
-
         };
-
     }
 
+
     /*
-    ================================================
-    REJECT
-    ================================================
+    ==================================================
+    REJECT WITHDRAWAL
+    ==================================================
     */
 
     async rejectWithdrawal(
-
         withdrawalId,
         reason = ""
-
     ) {
 
-        const withdrawalRef = db
-            .ref("withdrawalRequests")
-            .child(withdrawalId);
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .child(withdrawalId);
 
-        const snapshot = await withdrawalRef.get();
+
+        const snapshot =
+            await withdrawalRef.get();
+
 
         if (!snapshot.exists()) {
+
             throw new Error(
                 "Withdrawal request not found."
             );
         }
 
-        const withdrawal = snapshot.val();
 
-        if (withdrawal.status !== "pending") {
+        const withdrawal =
+            snapshot.val();
+
+
+        if (
+            withdrawal.status !== "pending"
+        ) {
+
             throw new Error(
                 "Withdrawal has already been processed."
             );
         }
 
-        const agentRef = db
-            .ref("agents")
-            .child(withdrawal.agentId);
 
-        const agentSnapshot = await agentRef.get();
+        /*
+        ==================================================
+        LOAD AGENT
+        ==================================================
+        */
+
+        const agentRef =
+            db
+                .ref("agents")
+                .child(withdrawal.agentId);
+
+
+        const agentSnapshot =
+            await agentRef.get();
+
 
         if (!agentSnapshot.exists()) {
-            throw new Error("Agent not found.");
+
+            throw new Error(
+                "Agent not found."
+            );
         }
 
-        const agent = agentSnapshot.val();
+
+        const agent =
+            agentSnapshot.val();
+
 
         const balance =
-            Number(agent.commissionBalance || 0);
+            Number(
+                agent.commissionBalance || 0
+            );
+
 
         const pending =
-            Number(agent.pendingWithdrawals || 0);
+            Number(
+                agent.pendingWithdrawals || 0
+            );
+
+
+        const now =
+            Date.now();
+
+
+        /*
+        ==================================================
+        UPDATE WITHDRAWAL
+        ==================================================
+        */
 
         await withdrawalRef.update({
 
-            status: "rejected",
+            status:
+                "rejected",
 
-            rejectedAt: Date.now(),
+            rejectedAt:
+                now,
 
-            rejectionReason: reason
+            rejectionReason:
+                reason,
 
+            updatedAt:
+                now
         });
+
+
+        /*
+        ==================================================
+        LEDGER
+        ==================================================
+        */
 
         await LedgerManager.record({
 
-    type:
-        LedgerTypes.WITHDRAWAL_REJECTED,
+            type:
+                LedgerTypes.WITHDRAWAL_REJECTED,
 
-    direction:
-        LedgerDirection.CREDIT,
+            direction:
+                LedgerDirection.CREDIT,
 
-    category:
-        LedgerCategory.WITHDRAWAL,
+            category:
+                LedgerCategory.WITHDRAWAL,
 
-    amount:
-        withdrawal.amount,
+            amount:
+                withdrawal.amount,
 
-    reference:
-        withdrawal.reference,
+            reference:
+                withdrawal.reference,
 
-    withdrawalId,
+            withdrawalId,
 
-    agentId:
-        withdrawal.agentId,
+            agentId:
+                withdrawal.agentId,
 
-    description:
-        "Withdrawal rejected",
+            description:
+                "Withdrawal rejected",
 
-    metadata: {
+            metadata: {
 
-        reason:
-            reason
+                reason
+            }
+        });
 
+
+        /*
+        ==================================================
+        RETURN MONEY TO WALLET
+        ==================================================
+        */
+
+        await agentRef.update({
+
+            commissionBalance:
+                balance +
+                Number(
+                    withdrawal.amount || 0
+                ),
+
+            pendingWithdrawals:
+                Math.max(
+                    0,
+                    pending -
+                    Number(
+                        withdrawal.amount || 0
+                    )
+                )
+        });
+
+
+        /*
+        ==================================================
+        ACTIVITY
+        ==================================================
+        */
+
+        await ActivityManager
+            .createWithdrawalActivity(
+                withdrawal.agentId,
+                {
+
+                    withdrawalId,
+
+                    reference:
+                        withdrawal.reference,
+
+                    amount:
+                        withdrawal.amount,
+
+                    status:
+                        "REJECTED",
+
+                    reason
+                }
+            );
+
+
+        /*
+        ==================================================
+        CACHE
+        ==================================================
+        */
+
+        await CacheManager.refreshAgent(
+            withdrawal.agentId
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            message:
+                "Withdrawal rejected."
+        };
     }
 
-});
-
-       await agentRef.update({
-
-    commissionBalance:
-        balance + withdrawal.amount,
-
-    pendingWithdrawals:
-        Math.max(
-            0,
-            pending - withdrawal.amount
-        )
-
-});
-
-await ActivityManager.createWithdrawalActivity(
-    withdrawal.agentId,
-    {
-        withdrawalId,
-        reference: withdrawal.reference,
-        amount: withdrawal.amount,
-        status: "REJECTED",
-        reason
-    }
-);
-
-await CacheManager.refreshAgent(
-    withdrawal.agentId
-);
-
-return {
-
-    success: true,
-
-    message: "Withdrawal rejected."
-
-};
-
-    }
 
     /*
-    ================================================
-    AGENT HISTORY
-    ================================================
+    ==================================================
+    AGENT WITHDRAWAL HISTORY
+    ==================================================
     */
 
-    async getAgentWithdrawals(agentId) {
+    async getAgentWithdrawals(
+        agentId
+    ) {
 
-        const snapshot = await db
-            .ref("withdrawalRequests")
-            .get();
+        const snapshot =
+            await db
+                .ref("withdrawalRequests")
+                .get();
+
 
         if (!snapshot.exists()) {
             return [];
         }
 
+
         const withdrawals = [];
 
-        snapshot.forEach(child => {
 
-            const withdrawal = child.val();
+        snapshot.forEach(
+            child => {
 
-            if (withdrawal.agentId === agentId) {
+                const withdrawal =
+                    child.val();
 
-                withdrawals.push({
 
-                    id: child.key,
+                if (
+                    withdrawal.agentId ===
+                    agentId
+                ) {
 
-                    ...withdrawal
+                    withdrawals.push({
 
-                });
+                        id:
+                            child.key,
 
+                        ...withdrawal
+                    });
+                }
             }
-
-        });
-
-        withdrawals.sort(
-
-            (a, b) =>
-                b.requestedAt - a.requestedAt
-
         );
 
+
+        withdrawals.sort(
+            (a, b) =>
+                Number(
+                    b.requestedAt || 0
+                ) -
+                Number(
+                    a.requestedAt || 0
+                )
+        );
+
+
         return withdrawals;
-
-    }
-    /*
-================================================
-GET WITHDRAWAL DETAILS
-================================================
-*/
-
-async getWithdrawalDetails(withdrawalId) {
-
-    const snapshot = await db
-        .ref("withdrawalRequests")
-        .child(withdrawalId)
-        .get();
-
-    if (!snapshot.exists()) {
-        throw new Error("Withdrawal request not found.");
     }
 
-    const withdrawal = snapshot.val();
 
     /*
-    ============================================
-    LOAD AGENT
-    ============================================
+    ==================================================
+    GET WITHDRAWAL DETAILS
+    ==================================================
     */
 
-    const agentSnapshot = await db
-        .ref("agents")
-        .child(withdrawal.agentId)
-        .get();
+    async getWithdrawalDetails(
+        withdrawalId
+    ) {
+
+        const snapshot =
+            await db
+                .ref("withdrawalRequests")
+                .child(withdrawalId)
+                .get();
+
+
+        if (!snapshot.exists()) {
+
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+
+        const withdrawal =
+            snapshot.val();
+
+
+        /*
+        ==================================================
+        LOAD AGENT
+        ==================================================
+        */
+
+        const agentSnapshot =
+            await db
+                .ref("agents")
+                .child(withdrawal.agentId)
+                .get();
+
+
+        /*
+        ==================================================
+        LOAD APPROVING ADMIN
+        ==================================================
+        */
+
+        let approvedByName = "";
+
+
+        if (
+            withdrawal.approvedById
+        ) {
+
+            const adminSnapshot =
+                await db
+                    .ref("admins")
+                    .child(
+                        withdrawal.approvedById
+                    )
+                    .get();
+
+
+            if (
+                adminSnapshot.exists()
+            ) {
+
+                approvedByName =
+                    adminSnapshot
+                        .val()
+                        .fullName || "";
+            }
+        }
+
+
+        /*
+        ==================================================
+        AGENT PAYOUT INFORMATION
+        ==================================================
+        */
+
+        let email = "";
+        let payout = {};
+
+
+        if (
+            agentSnapshot.exists()
+        ) {
+
+            const agent =
+                agentSnapshot.val();
+
+
+            email =
+                agent.email || "";
+
+
+            payout =
+                agent.payout || {};
+        }
+
+
+        /*
+        ==================================================
+        RETURN DETAILS
+        ==================================================
+        */
+
+        return {
+
+            id:
+                withdrawal.id ||
+                withdrawalId,
+
+            agentId:
+                withdrawal.agentId,
+
+            agentName:
+                withdrawal.agentName,
+
+            reference:
+                withdrawal.reference,
+
+
+            /*
+            Agent information
+            */
+
+            email,
+
+            phone:
+                withdrawal.phone || "",
+
+            verified:
+                payout.verified || false,
+
+
+            /*
+            Payment method
+            */
+
+            paymentMethod:
+                withdrawal.paymentMethod ||
+                "MPESA",
+
+
+            /*
+            PayPal
+            */
+
+            paypalEmail:
+                withdrawal.paypalEmail ||
+                "",
+
+            payoutAmount:
+                Number(
+                    withdrawal.payoutAmount || 0
+                ),
+
+            payoutCurrency:
+                withdrawal.payoutCurrency ||
+                "",
+
+            paypalSenderBatchId:
+                withdrawal.paypalSenderBatchId ||
+                "",
+
+            paypalBatchId:
+                withdrawal.paypalBatchId ||
+                "",
+
+            paypalItemId:
+                withdrawal.paypalItemId ||
+                "",
+
+            paypalTransactionId:
+                withdrawal.paypalTransactionId ||
+                "",
+
+
+            /*
+            Accounting
+            */
+
+            amount:
+                Number(
+                    withdrawal.amount || 0
+                ),
+
+            availableBalanceBefore:
+                withdrawal.availableBalanceBefore,
+
+
+            /*
+            Status
+            */
+
+            status:
+                withdrawal.status,
+
+            paymentStatus:
+                withdrawal.paymentStatus ||
+                "NOT_SENT",
+
+            paymentReference:
+                withdrawal.paymentReference ||
+                "",
+
+            paymentFailureReason:
+                withdrawal.paymentFailureReason ||
+                "",
+
+
+            /*
+            Timestamps
+            */
+
+            requestedAt:
+                withdrawal.requestedAt,
+
+            approvedAt:
+                withdrawal.approvedAt,
+
+            rejectedAt:
+                withdrawal.rejectedAt,
+
+            paidAt:
+                withdrawal.paidAt,
+
+
+            /*
+            Admin
+            */
+
+            approvedById:
+                withdrawal.approvedById ||
+                "",
+
+            approvedByName:
+                approvedByName,
+
+            rejectionReason:
+                withdrawal.rejectionReason ||
+                "",
+
+
+            /*
+            M-Pesa
+            */
+
+            mpesaReceipt:
+                withdrawal.mpesaReceipt ||
+                "",
+
+
+            /*
+            Processing
+            */
+
+            paymentAttemptedAt:
+                withdrawal.paymentAttemptedAt ||
+                null,
+
+            paymentCompletedAt:
+                withdrawal.paymentCompletedAt ||
+                null,
+
+            paymentFailedAt:
+                withdrawal.paymentFailedAt ||
+                null
+        };
+    }
 
 
     /*
-============================================
-LOAD APPROVING ADMIN
-============================================
-*/
+    ==================================================
+    PREVENT DUPLICATE WITHDRAWAL
+    ==================================================
+    */
 
-let approvedByName = "";
+    async pendingWithdrawalExists(
+        agentId
+    ) {
 
-if (withdrawal.approvedById) {
+        const snapshot =
+            await db
+                .ref("withdrawalRequests")
+                .orderByChild("agentId")
+                .equalTo(agentId)
+                .get();
 
-    const adminSnapshot = await db
-        .ref("admins")
-        .child(withdrawal.approvedById)
-        .get();
 
-    if (adminSnapshot.exists()) {
+        if (!snapshot.exists()) {
+            return false;
+        }
 
-        approvedByName =
-            adminSnapshot.val().fullName || "";
 
+        let exists = false;
+
+
+        snapshot.forEach(
+            child => {
+
+                const status =
+                    child.val().status;
+
+
+                if (
+
+                    status === "pending" ||
+
+                    status === "approved" ||
+
+                    status === "processing"
+
+                ) {
+
+                    exists = true;
+                }
+            }
+        );
+
+
+        return exists;
     }
 
-}    
 
-    let email = "";
-    let payout = {};
+    /*
+    ==================================================
+    GENERATE WITHDRAWAL REFERENCE
+    ==================================================
+    */
 
-    if (agentSnapshot.exists()) {
+    async generateWithdrawalReference() {
 
-        const agent = agentSnapshot.val();
+        const counterRef =
+            db.ref(
+                "counters/withdrawals"
+            );
 
-        email = agent.email || "";
 
-        payout = agent.payout || {};
+        const transaction =
+            await counterRef.transaction(
+                current => {
+
+                    return (
+                        current || 0
+                    ) + 1;
+                }
+            );
+
+
+        const sequence =
+            transaction
+                .snapshot
+                .val();
+
+
+        const today =
+            new Date();
+
+
+        const year =
+            today.getFullYear();
+
+
+        const month =
+            String(
+                today.getMonth() + 1
+            ).padStart(2, "0");
+
+
+        const day =
+            String(
+                today.getDate()
+            ).padStart(2, "0");
+
+
+        const number =
+            String(sequence)
+                .padStart(6, "0");
+
+
+        return `WD-${year}${month}${day}-${number}`;
     }
-
-    return {
-
-    id: withdrawal.id,
-
-    agentId: withdrawal.agentId,
-
-    agentName: withdrawal.agentName,
-
-    reference: withdrawal.reference,
-
-    email,
-
-    phone: withdrawal.phone,
-
-    verified: payout.verified || false,
-
-    amount: withdrawal.amount,
-
-    availableBalanceBefore:
-        withdrawal.availableBalanceBefore,
-
-    status: withdrawal.status,
-
-    requestedAt: withdrawal.requestedAt,
-
-    approvedAt: withdrawal.approvedAt,
-
-    rejectedAt: withdrawal.rejectedAt,
-
-    paidAt: withdrawal.paidAt,
-
-    approvedById: withdrawal.approvedById || "",
-
-    approvedByName: approvedByName,
-
-    rejectionReason:
-        withdrawal.rejectionReason,
-
-    mpesaReceipt:
-        withdrawal.mpesaReceipt
-
-};
-
-}
-
-/*
-==========================================
-PREVENT DUPLICATE WITHDRAWAL
-==========================================
-*/
-async pendingWithdrawalExists(agentId) {
-
-    const snapshot = await db
-        .ref("withdrawalRequests")
-        .orderByChild("agentId")
-        .equalTo(agentId)
-        .get();
-
-    if (!snapshot.exists()) {
-        return false;
-    }
-
-    let exists = false;
-
-    snapshot.forEach(child => {
-
-        const status = child.val().status;
-
-if (
-
-    status === "pending" ||
-
-    status === "approved" ||
-
-    status === "processing"
-
-) {
-
-    exists = true;
-
-}
-    });
-
-    return exists;
-
 }
 
 
-
-/*
-==========================================
-GENERATE WITHDRAWAL REFERENCE
-==========================================
-*/
-
-async generateWithdrawalReference() {
-
-    const counterRef =
-        db.ref("counters/withdrawals");
-
-    const transaction =
-        await counterRef.transaction(current => {
-
-            return (current || 0) + 1;
-
-        });
-
-    const sequence =
-        transaction.snapshot.val();
-
-    const today = new Date();
-
-    const year = today.getFullYear();
-
-    const month =
-        String(today.getMonth() + 1)
-            .padStart(2, "0");
-
-    const day =
-        String(today.getDate())
-            .padStart(2, "0");
-
-    const number =
-        String(sequence)
-            .padStart(6, "0");
-
-    return `WD-${year}${month}${day}-${number}`;
-
-}
-
-}
-
-module.exports = new WithdrawalManager();
+module.exports =
+    new WithdrawalManager();
