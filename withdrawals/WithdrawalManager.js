@@ -1080,10 +1080,8 @@ async markPaymentFailed(
             .ref("withdrawalRequests")
             .child(withdrawalId);
 
-
     const snapshot =
         await withdrawalRef.get();
-
 
     if (!snapshot.exists()) {
 
@@ -1092,41 +1090,8 @@ async markPaymentFailed(
         );
     }
 
-
     const withdrawal =
         snapshot.val();
-
-
-    /*
-    ==========================================
-    PREVENT DUPLICATE RESTORATION
-    ==========================================
-    */
-
-    if (
-        withdrawal.status === "payment_failed" &&
-        withdrawal.commissionRestored === true
-    ) {
-
-        console.log(
-            "Payment already failed and commission was already restored:",
-            withdrawalId
-        );
-
-
-        return {
-
-            success:
-                true,
-
-            alreadyProcessed:
-                true,
-
-            message:
-                "Payment already failed and commission was already restored."
-        };
-    }
-
 
     /*
     ==========================================
@@ -1139,10 +1104,8 @@ async markPaymentFailed(
             .ref("agents")
             .child(withdrawal.agentId);
 
-
     const agentSnapshot =
         await agentRef.get();
-
 
     if (!agentSnapshot.exists()) {
 
@@ -1151,10 +1114,68 @@ async markPaymentFailed(
         );
     }
 
-
     const agent =
         agentSnapshot.val();
 
+    /*
+    ==========================================
+    AMOUNT
+    ==========================================
+    */
+
+    const amount =
+        Number(
+            withdrawal.amount || 0
+        );
+
+    if (amount <= 0) {
+
+        throw new Error(
+            "Invalid withdrawal amount."
+        );
+    }
+
+    /*
+    ==========================================
+    CHECK PROCESSING STATE
+    ==========================================
+    */
+
+    const commissionRestored =
+        withdrawal.commissionRestored === true;
+
+    const pendingRestored =
+        withdrawal.pendingWithdrawalRestored === true;
+
+    /*
+    ==========================================
+    ALREADY COMPLETELY PROCESSED
+    ==========================================
+    */
+
+    if (
+        withdrawal.status === "payment_failed" &&
+        commissionRestored === true &&
+        pendingRestored === true
+    ) {
+
+        console.log(
+            "Payment already failed and wallet was fully restored:",
+            withdrawalId
+        );
+
+        return {
+
+            success:
+                true,
+
+            alreadyProcessed:
+                true,
+
+            message:
+                "Payment already failed and wallet was fully restored."
+        };
+    }
 
     /*
     ==========================================
@@ -1167,39 +1188,54 @@ async markPaymentFailed(
             agent.commissionBalance || 0
         );
 
-
     const pendingWithdrawals =
         Number(
             agent.pendingWithdrawals || 0
         );
 
+    /*
+    ==========================================
+    CALCULATE WALLET CHANGES
+    ==========================================
+    */
 
-    const amount =
-        Number(
-            withdrawal.amount || 0
-        );
+    let restoredBalance =
+        commissionBalance;
 
+    let restoredPending =
+        pendingWithdrawals;
 
     /*
     ==========================================
     RESTORE COMMISSION
+    ONLY IF NOT ALREADY RESTORED
     ==========================================
     */
 
-    const restoredBalance =
-        commissionBalance + amount;
+    if (!commissionRestored) {
 
+        restoredBalance =
+            commissionBalance + amount;
+    }
 
-    const restoredPending =
-        Math.max(
-            0,
-            pendingWithdrawals - amount
-        );
+    /*
+    ==========================================
+    RESTORE PENDING WITHDRAWAL
+    ONLY IF NOT ALREADY RESTORED
+    ==========================================
+    */
 
+    if (!pendingRestored) {
+
+        restoredPending =
+            Math.max(
+                0,
+                pendingWithdrawals - amount
+            );
+    }
 
     const now =
         Date.now();
-
 
     /*
     ==========================================
@@ -1216,22 +1252,27 @@ async markPaymentFailed(
             "FAILED",
 
         paymentFailedAt:
+            withdrawal.paymentFailedAt ||
             now,
 
         paymentFailureReason:
-            reason,
+            reason ||
+            withdrawal.paymentFailureReason ||
+            "",
 
         commissionRestored:
+            true,
+
+        pendingWithdrawalRestored:
             true,
 
         updatedAt:
             now
     });
 
-
     /*
     ==========================================
-    RETURN MONEY TO AGENT WALLET
+    UPDATE AGENT WALLET
     ==========================================
     */
 
@@ -1244,82 +1285,88 @@ async markPaymentFailed(
             restoredPending
     });
 
-
     /*
     ==========================================
     FINANCIAL LEDGER
+    ONLY CREATE LEDGER ENTRY FOR A NEW
+    COMMISSION RESTORATION
     ==========================================
     */
 
-    await LedgerManager.record({
+    if (!commissionRestored) {
 
-        type:
-            LedgerTypes.WITHDRAWAL_REJECTED,
+        await LedgerManager.record({
 
-        direction:
-            LedgerDirection.CREDIT,
+            type:
+                LedgerTypes.WITHDRAWAL_REJECTED,
 
-        category:
-            LedgerCategory.WITHDRAWAL,
+            direction:
+                LedgerDirection.CREDIT,
 
-        amount,
+            category:
+                LedgerCategory.WITHDRAWAL,
 
-        reference:
-            withdrawal.reference,
+            amount,
 
-        withdrawalId,
+            reference:
+                withdrawal.reference,
 
-        agentId:
-            withdrawal.agentId,
+            withdrawalId,
 
-        description:
-            "Failed payment — commission restored",
+            agentId:
+                withdrawal.agentId,
 
-        metadata: {
+            description:
+                "Failed payment — commission restored",
 
-            reason,
-
-            paymentMethod:
-                withdrawal.paymentMethod ||
-                "MPESA",
-
-            paymentStatus:
-                "FAILED",
-
-            commissionRestored:
-                true
-        }
-    });
-
-
-    /*
-    ==========================================
-    ACTIVITY
-    ==========================================
-    */
-
-    await ActivityManager
-        .createWithdrawalActivity(
-            withdrawal.agentId,
-            {
-
-                withdrawalId,
-
-                reference:
-                    withdrawal.reference,
-
-                amount,
-
-                status:
-                    "FAILED",
+            metadata: {
 
                 reason,
+
+                paymentMethod:
+                    withdrawal.paymentMethod ||
+                    "MPESA",
+
+                paymentStatus:
+                    "FAILED",
 
                 commissionRestored:
                     true
             }
-        );
+        });
+    }
 
+    /*
+    ==========================================
+    ACTIVITY
+    ONLY CREATE ACTIVITY FOR NEW FAILURE
+    ==========================================
+    */
+
+    if (!commissionRestored) {
+
+        await ActivityManager
+            .createWithdrawalActivity(
+                withdrawal.agentId,
+                {
+
+                    withdrawalId,
+
+                    reference:
+                        withdrawal.reference,
+
+                    amount,
+
+                    status:
+                        "FAILED",
+
+                    reason,
+
+                    commissionRestored:
+                        true
+                }
+            );
+    }
 
     /*
     ==========================================
@@ -1331,13 +1378,18 @@ async markPaymentFailed(
         withdrawal.agentId
     );
 
+    /*
+    ==========================================
+    LOG
+    ==========================================
+    */
 
     console.log(
         "======================================"
     );
 
     console.log(
-        "PAYMENT FAILED — COMMISSION RESTORED"
+        "PAYMENT FAILED — WALLET RESTORED"
     );
 
     console.log(
@@ -1351,8 +1403,18 @@ async markPaymentFailed(
     );
 
     console.log(
-        "Amount restored:",
+        "Amount:",
         amount
+    );
+
+    console.log(
+        "Commission already restored:",
+        commissionRestored
+    );
+
+    console.log(
+        "Pending already restored:",
+        pendingRestored
     );
 
     console.log(
@@ -1369,19 +1431,25 @@ async markPaymentFailed(
         "======================================"
     );
 
-
     return {
 
         success:
             true,
 
         message:
-            "Payment failed and commission restored.",
+            "Payment failed and wallet restored.",
 
         withdrawalId,
 
         amountRestored:
-            amount,
+            !commissionRestored
+                ? amount
+                : 0,
+
+        pendingWithdrawalRestored:
+            !pendingRestored
+                ? amount
+                : 0,
 
         commissionBalance:
             restoredBalance,
@@ -1390,6 +1458,7 @@ async markPaymentFailed(
             restoredPending
     };
 }
+
 
 
     /*
