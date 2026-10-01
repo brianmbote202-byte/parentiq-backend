@@ -980,3 +980,4 @@ EXPORT SINGLE MANAGER INSTANCE
 
 module.exports =
     new PayPalPayoutManager();
+    

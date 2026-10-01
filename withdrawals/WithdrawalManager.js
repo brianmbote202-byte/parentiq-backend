@@ -431,6 +431,8 @@ class WithdrawalManager {
             paymentReference:
                 "",
 
+            commissionRestored: false,    
+
 
             /*
             ==================================================
@@ -1039,96 +1041,76 @@ class WithdrawalManager {
     ==================================================
     */
 
-    async markPaymentFailed(
-        withdrawalId,
-        reason = ""
+    /*
+==================================================
+MARK PAYMENT FAILED
+==================================================
+
+IMPORTANT:
+
+When a payment provider rejects a withdrawal,
+the money must be returned to the agent wallet.
+
+This method is IDEMPOTENT.
+
+It will restore the commission only once.
+
+Example:
+
+commissionBalance = 800
+pendingWithdrawals = 200
+
+PayPal FAILED
+
+commissionBalance = 1000
+pendingWithdrawals = 0
+
+Calling this method again will NOT add another
+KES 200.
+==================================================
+*/
+
+async markPaymentFailed(
+    withdrawalId,
+    reason = ""
+) {
+
+    const withdrawalRef =
+        db
+            .ref("withdrawalRequests")
+            .child(withdrawalId);
+
+
+    const snapshot =
+        await withdrawalRef.get();
+
+
+    if (!snapshot.exists()) {
+
+        throw new Error(
+            "Withdrawal request not found."
+        );
+    }
+
+
+    const withdrawal =
+        snapshot.val();
+
+
+    /*
+    ==========================================
+    PREVENT DUPLICATE RESTORATION
+    ==========================================
+    */
+
+    if (
+        withdrawal.status === "payment_failed" &&
+        withdrawal.commissionRestored === true
     ) {
 
-        const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
-
-
-        const snapshot =
-            await withdrawalRef.get();
-
-
-        if (!snapshot.exists()) {
-            throw new Error(
-                "Withdrawal request not found."
-            );
-        }
-
-
-        const withdrawal =
-            snapshot.val();
-
-
-        const now =
-            Date.now();
-
-
-        /*
-        ==================================================
-        UPDATE WITHDRAWAL
-        ==================================================
-        */
-
-        await withdrawalRef.update({
-
-            status:
-                "payment_failed",
-
-            paymentStatus:
-                "FAILED",
-
-            paymentFailedAt:
-                now,
-
-            paymentFailureReason:
-                reason,
-
-            updatedAt:
-                now
-        });
-
-
-        /*
-        ==================================================
-        ACTIVITY
-        ==================================================
-        */
-
-        await ActivityManager
-            .createWithdrawalActivity(
-                withdrawal.agentId,
-                {
-
-                    withdrawalId,
-
-                    reference:
-                        withdrawal.reference,
-
-                    amount:
-                        withdrawal.amount,
-
-                    status:
-                        "FAILED",
-
-                    reason
-                }
-            );
-
-
-        /*
-        ==================================================
-        CACHE
-        ==================================================
-        */
-
-        await CacheManager.refreshAgent(
-            withdrawal.agentId
+        console.log(
+            "Payment already failed and commission was already restored:",
+            withdrawalId
         );
 
 
@@ -1137,10 +1119,277 @@ class WithdrawalManager {
             success:
                 true,
 
+            alreadyProcessed:
+                true,
+
             message:
-                "Withdrawal marked as failed."
+                "Payment already failed and commission was already restored."
         };
     }
+
+
+    /*
+    ==========================================
+    LOAD AGENT
+    ==========================================
+    */
+
+    const agentRef =
+        db
+            .ref("agents")
+            .child(withdrawal.agentId);
+
+
+    const agentSnapshot =
+        await agentRef.get();
+
+
+    if (!agentSnapshot.exists()) {
+
+        throw new Error(
+            "Agent not found."
+        );
+    }
+
+
+    const agent =
+        agentSnapshot.val();
+
+
+    /*
+    ==========================================
+    CURRENT WALLET VALUES
+    ==========================================
+    */
+
+    const commissionBalance =
+        Number(
+            agent.commissionBalance || 0
+        );
+
+
+    const pendingWithdrawals =
+        Number(
+            agent.pendingWithdrawals || 0
+        );
+
+
+    const amount =
+        Number(
+            withdrawal.amount || 0
+        );
+
+
+    /*
+    ==========================================
+    RESTORE COMMISSION
+    ==========================================
+    */
+
+    const restoredBalance =
+        commissionBalance + amount;
+
+
+    const restoredPending =
+        Math.max(
+            0,
+            pendingWithdrawals - amount
+        );
+
+
+    const now =
+        Date.now();
+
+
+    /*
+    ==========================================
+    UPDATE WITHDRAWAL
+    ==========================================
+    */
+
+    await withdrawalRef.update({
+
+        status:
+            "payment_failed",
+
+        paymentStatus:
+            "FAILED",
+
+        paymentFailedAt:
+            now,
+
+        paymentFailureReason:
+            reason,
+
+        commissionRestored:
+            true,
+
+        updatedAt:
+            now
+    });
+
+
+    /*
+    ==========================================
+    RETURN MONEY TO AGENT WALLET
+    ==========================================
+    */
+
+    await agentRef.update({
+
+        commissionBalance:
+            restoredBalance,
+
+        pendingWithdrawals:
+            restoredPending
+    });
+
+
+    /*
+    ==========================================
+    FINANCIAL LEDGER
+    ==========================================
+    */
+
+    await LedgerManager.record({
+
+        type:
+            LedgerTypes.WITHDRAWAL_REJECTED,
+
+        direction:
+            LedgerDirection.CREDIT,
+
+        category:
+            LedgerCategory.WITHDRAWAL,
+
+        amount,
+
+        reference:
+            withdrawal.reference,
+
+        withdrawalId,
+
+        agentId:
+            withdrawal.agentId,
+
+        description:
+            "Failed payment — commission restored",
+
+        metadata: {
+
+            reason,
+
+            paymentMethod:
+                withdrawal.paymentMethod ||
+                "MPESA",
+
+            paymentStatus:
+                "FAILED",
+
+            commissionRestored:
+                true
+        }
+    });
+
+
+    /*
+    ==========================================
+    ACTIVITY
+    ==========================================
+    */
+
+    await ActivityManager
+        .createWithdrawalActivity(
+            withdrawal.agentId,
+            {
+
+                withdrawalId,
+
+                reference:
+                    withdrawal.reference,
+
+                amount,
+
+                status:
+                    "FAILED",
+
+                reason,
+
+                commissionRestored:
+                    true
+            }
+        );
+
+
+    /*
+    ==========================================
+    REFRESH CACHE
+    ==========================================
+    */
+
+    await CacheManager.refreshAgent(
+        withdrawal.agentId
+    );
+
+
+    console.log(
+        "======================================"
+    );
+
+    console.log(
+        "PAYMENT FAILED — COMMISSION RESTORED"
+    );
+
+    console.log(
+        "Withdrawal:",
+        withdrawalId
+    );
+
+    console.log(
+        "Agent:",
+        withdrawal.agentId
+    );
+
+    console.log(
+        "Amount restored:",
+        amount
+    );
+
+    console.log(
+        "New commission balance:",
+        restoredBalance
+    );
+
+    console.log(
+        "New pending withdrawals:",
+        restoredPending
+    );
+
+    console.log(
+        "======================================"
+    );
+
+
+    return {
+
+        success:
+            true,
+
+        message:
+            "Payment failed and commission restored.",
+
+        withdrawalId,
+
+        amountRestored:
+            amount,
+
+        commissionBalance:
+            restoredBalance,
+
+        pendingWithdrawals:
+            restoredPending
+    };
+}
 
 
     /*
