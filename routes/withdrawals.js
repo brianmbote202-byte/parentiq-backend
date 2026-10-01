@@ -1163,5 +1163,61 @@ router.post(
     }
 );
 
+router.patch("/:withdrawalId/paypal-receiver", async (req, res) => {
+    try {
+        const { withdrawalId } = req.params;
+        const { paypalEmail } = req.body;
+
+        if (!paypalEmail) {
+            return res.status(400).json({
+                success: false,
+                error: "paypalEmail is required"
+            });
+        }
+
+        const withdrawalRef = db.ref(`withdrawalRequests/${withdrawalId}`);
+        const snapshot = await withdrawalRef.once("value");
+
+        if (!snapshot.exists()) {
+            return res.status(404).json({
+                success: false,
+                error: "Withdrawal not found"
+            });
+        }
+
+        const withdrawal = snapshot.val();
+
+        if (withdrawal.status !== "payment_failed") {
+            return res.status(400).json({
+                success: false,
+                error: `Withdrawal must be payment_failed. Current status: ${withdrawal.status}`
+            });
+        }
+
+        await withdrawalRef.update({
+            paypalEmail: paypalEmail.trim(),
+            updatedAt: Date.now()
+        });
+
+        console.log(
+            `[PAYPAL RECEIVER UPDATED] ${withdrawalId} -> ${paypalEmail.trim()}`
+        );
+
+        return res.json({
+            success: true,
+            withdrawalId,
+            paypalEmail: paypalEmail.trim()
+        });
+
+    } catch (error) {
+        console.error("Error updating PayPal receiver:", error);
+
+        return res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 
 module.exports = router;
