@@ -1,3 +1,4 @@
+
 const { db } = require("../firebase");
 
 const ActivityManager =
@@ -125,11 +126,6 @@ class WithdrawalManager {
                 );
             }
 
-            /*
-            PayPal payout amount must be
-            provided before the payment is sent.
-            */
-
             if (
                 isNaN(payoutAmount) ||
                 payoutAmount <= 0
@@ -162,7 +158,6 @@ class WithdrawalManager {
             );
         }
 
-
         if (
             amount < MIN_WITHDRAWAL
         ) {
@@ -170,7 +165,6 @@ class WithdrawalManager {
                 `Minimum withdrawal is KES ${MIN_WITHDRAWAL}.`
             );
         }
-
 
         if (
             amount > MAX_WITHDRAWAL
@@ -203,7 +197,6 @@ class WithdrawalManager {
 
         const agent =
             snapshot.val();
-
 
         const balance =
             Number(
@@ -259,22 +252,23 @@ class WithdrawalManager {
                 .ref("withdrawalRequests")
                 .push();
 
-
         const reference =
             await this.generateWithdrawalReference();
-
 
         const now =
             Date.now();
 
 
         /*
-        Stable PayPal sender batch ID.
+        ==================================================
+        STABLE PAYPAL SENDER BATCH ID
+        ==================================================
 
-        IMPORTANT:
-        This must not use Date.now()
-        because retries could create duplicate
-        PayPal payouts.
+        Never use Date.now() here.
+
+        The withdrawal ID is stable, so retrying
+        the same withdrawal uses the same sender
+        batch ID.
         */
 
         const paypalSenderBatchId =
@@ -315,9 +309,6 @@ class WithdrawalManager {
             ==================================================
             ACCOUNTING AMOUNT
             ==================================================
-
-            This remains the agent's commission
-            amount in KES.
             */
 
             amount,
@@ -327,18 +318,6 @@ class WithdrawalManager {
             ==================================================
             PAYPAL PAYOUT
             ==================================================
-
-            payoutAmount is the amount actually sent
-            through PayPal.
-
-            Example:
-
-            amount = KES 200
-            payoutAmount = USD 2.00
-
-            The conversion should eventually be
-            calculated by the backend using your
-            configured FX rate.
             */
 
             payoutAmount:
@@ -373,7 +352,6 @@ class WithdrawalManager {
             status:
                 "pending",
 
-
             requestedAt:
                 now,
 
@@ -401,7 +379,6 @@ class WithdrawalManager {
 
             approvedByName:
                 "",
-
 
             rejectionReason:
                 "",
@@ -431,7 +408,11 @@ class WithdrawalManager {
             paymentReference:
                 "",
 
-            commissionRestored: false,    
+            commissionRestored:
+                false,
+
+            pendingWithdrawalRestored:
+                false,
 
 
             /*
@@ -463,6 +444,17 @@ class WithdrawalManager {
                 "",
 
             paypalTransactionId:
+                "",
+
+            /*
+            These are important because the admin
+            dashboard displays them directly.
+            */
+
+            paypalBatchStatus:
+                "",
+
+            paypalTransactionStatus:
                 "",
 
 
@@ -597,12 +589,6 @@ class WithdrawalManager {
             );
 
 
-        /*
-        ==================================================
-        RETURN
-        ==================================================
-        */
-
         return {
 
             success:
@@ -617,6 +603,7 @@ class WithdrawalManager {
                 pending + amount
         };
     }
+
 
 
     /*
@@ -635,10 +622,8 @@ class WithdrawalManager {
                 .ref("withdrawalRequests")
                 .child(withdrawalId);
 
-
         const snapshot =
             await withdrawalRef.get();
-
 
         if (!snapshot.exists()) {
             throw new Error(
@@ -646,10 +631,8 @@ class WithdrawalManager {
             );
         }
 
-
         const withdrawal =
             snapshot.val();
-
 
         if (
             withdrawal.status !== "pending"
@@ -669,7 +652,6 @@ class WithdrawalManager {
         let adminName =
             "Administrator";
 
-
         if (adminId) {
 
             const adminSnapshot =
@@ -678,12 +660,10 @@ class WithdrawalManager {
                     .child(adminId)
                     .get();
 
-
             if (adminSnapshot.exists()) {
 
                 const admin =
                     adminSnapshot.val();
-
 
                 adminName =
                     admin.fullName ||
@@ -702,7 +682,6 @@ class WithdrawalManager {
 
         const now =
             Date.now();
-
 
         await withdrawalRef.update({
 
@@ -779,6 +758,7 @@ class WithdrawalManager {
             .createWithdrawalActivity(
                 withdrawal.agentId,
                 {
+
                     withdrawalId,
 
                     reference:
@@ -815,6 +795,7 @@ class WithdrawalManager {
     }
 
 
+
     /*
     ==================================================
     MARK M-PESA PROCESSING
@@ -832,10 +813,8 @@ class WithdrawalManager {
                 .ref("withdrawalRequests")
                 .child(withdrawalId);
 
-
         const snapshot =
             await withdrawalRef.get();
-
 
         if (!snapshot.exists()) {
             throw new Error(
@@ -843,16 +822,9 @@ class WithdrawalManager {
             );
         }
 
-
         const withdrawal =
             snapshot.val();
 
-
-        /*
-        ==================================================
-        ONLY M-PESA USES THIS METHOD
-        ==================================================
-        */
 
         if (
             withdrawal.paymentMethod === "PAYPAL"
@@ -862,12 +834,6 @@ class WithdrawalManager {
             );
         }
 
-
-        /*
-        ==================================================
-        VALIDATE STATUS
-        ==================================================
-        */
 
         if (
             withdrawal.status !== "approved" &&
@@ -881,7 +847,6 @@ class WithdrawalManager {
 
         const now =
             Date.now();
-
 
         await withdrawalRef.update({
 
@@ -925,6 +890,7 @@ class WithdrawalManager {
     }
 
 
+
     /*
     ==================================================
     MARK PAYPAL PROCESSING
@@ -942,10 +908,8 @@ class WithdrawalManager {
                 .ref("withdrawalRequests")
                 .child(withdrawalId);
 
-
         const snapshot =
             await withdrawalRef.get();
-
 
         if (!snapshot.exists()) {
             throw new Error(
@@ -953,16 +917,9 @@ class WithdrawalManager {
             );
         }
 
-
         const withdrawal =
             snapshot.val();
 
-
-        /*
-        ==================================================
-        VALIDATE PAYMENT METHOD
-        ==================================================
-        */
 
         if (
             withdrawal.paymentMethod !== "PAYPAL"
@@ -972,12 +929,6 @@ class WithdrawalManager {
             );
         }
 
-
-        /*
-        ==================================================
-        VALIDATE STATUS
-        ==================================================
-        */
 
         if (
             withdrawal.status !== "approved" &&
@@ -1008,10 +959,25 @@ class WithdrawalManager {
                 now,
 
             paypalBatchId:
-                paypalBatchId || "",
+                paypalBatchId ||
+                withdrawal.paypalBatchId ||
+                "",
 
             paypalItemId:
-                paypalItemId || "",
+                paypalItemId ||
+                withdrawal.paypalItemId ||
+                "",
+
+            /*
+            A new payment attempt should not
+            inherit a previous provider status.
+            */
+
+            paypalBatchStatus:
+                "",
+
+            paypalTransactionStatus:
+                "",
 
             updatedAt:
                 now
@@ -1035,429 +1001,403 @@ class WithdrawalManager {
     }
 
 
+
     /*
     ==================================================
     MARK PAYMENT FAILED
     ==================================================
+
+    IMPORTANT:
+
+    This method is idempotent.
+
+    The commission is restored only once.
     */
 
-    /*
-==================================================
-MARK PAYMENT FAILED
-==================================================
-
-IMPORTANT:
-
-When a payment provider rejects a withdrawal,
-the money must be returned to the agent wallet.
-
-This method is IDEMPOTENT.
-
-It will restore the commission only once.
-
-Example:
-
-commissionBalance = 800
-pendingWithdrawals = 200
-
-PayPal FAILED
-
-commissionBalance = 1000
-pendingWithdrawals = 0
-
-Calling this method again will NOT add another
-KES 200.
-==================================================
-*/
-
-async markPaymentFailed(
-    withdrawalId,
-    reason = ""
-) {
-
-    const withdrawalRef =
-        db
-            .ref("withdrawalRequests")
-            .child(withdrawalId);
-
-    const snapshot =
-        await withdrawalRef.get();
-
-    if (!snapshot.exists()) {
-
-        throw new Error(
-            "Withdrawal request not found."
-        );
-    }
-
-    const withdrawal =
-        snapshot.val();
-
-    /*
-    ==========================================
-    LOAD AGENT
-    ==========================================
-    */
-
-    const agentRef =
-        db
-            .ref("agents")
-            .child(withdrawal.agentId);
-
-    const agentSnapshot =
-        await agentRef.get();
-
-    if (!agentSnapshot.exists()) {
-
-        throw new Error(
-            "Agent not found."
-        );
-    }
-
-    const agent =
-        agentSnapshot.val();
-
-    /*
-    ==========================================
-    AMOUNT
-    ==========================================
-    */
-
-    const amount =
-        Number(
-            withdrawal.amount || 0
-        );
-
-    if (amount <= 0) {
-
-        throw new Error(
-            "Invalid withdrawal amount."
-        );
-    }
-
-    /*
-    ==========================================
-    CHECK PROCESSING STATE
-    ==========================================
-    */
-
-    const commissionRestored =
-        withdrawal.commissionRestored === true;
-
-    const pendingRestored =
-        withdrawal.pendingWithdrawalRestored === true;
-
-    /*
-    ==========================================
-    ALREADY COMPLETELY PROCESSED
-    ==========================================
-    */
-
-    if (
-        withdrawal.status === "payment_failed" &&
-        commissionRestored === true &&
-        pendingRestored === true
+    async markPaymentFailed(
+        withdrawalId,
+        reason = ""
     ) {
 
+        const withdrawalRef =
+            db
+                .ref("withdrawalRequests")
+                .child(withdrawalId);
+
+        const snapshot =
+            await withdrawalRef.get();
+
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+        const withdrawal =
+            snapshot.val();
+
+
+        /*
+        ==================================================
+        LOAD AGENT
+        ==================================================
+        */
+
+        const agentRef =
+            db
+                .ref("agents")
+                .child(withdrawal.agentId);
+
+        const agentSnapshot =
+            await agentRef.get();
+
+        if (!agentSnapshot.exists()) {
+            throw new Error(
+                "Agent not found."
+            );
+        }
+
+        const agent =
+            agentSnapshot.val();
+
+
+        /*
+        ==================================================
+        AMOUNT
+        ==================================================
+        */
+
+        const amount =
+            Number(
+                withdrawal.amount || 0
+            );
+
+        if (amount <= 0) {
+            throw new Error(
+                "Invalid withdrawal amount."
+            );
+        }
+
+
+        /*
+        ==================================================
+        RESTORATION FLAGS
+        ==================================================
+        */
+
+        const commissionRestored =
+            withdrawal.commissionRestored === true;
+
+        const pendingRestored =
+            withdrawal.pendingWithdrawalRestored === true;
+
+
+        /*
+        ==================================================
+        ALREADY COMPLETELY PROCESSED
+        ==================================================
+        */
+
+        if (
+            withdrawal.status === "payment_failed" &&
+            commissionRestored === true &&
+            pendingRestored === true
+        ) {
+
+            console.log(
+                "Payment already failed and wallet was fully restored:",
+                withdrawalId
+            );
+
+            return {
+
+                success:
+                    true,
+
+                alreadyProcessed:
+                    true,
+
+                message:
+                    "Payment already failed and wallet was fully restored."
+            };
+        }
+
+
+        /*
+        ==================================================
+        CURRENT WALLET VALUES
+        ==================================================
+        */
+
+        const commissionBalance =
+            Number(
+                agent.commissionBalance || 0
+            );
+
+        const pendingWithdrawals =
+            Number(
+                agent.pendingWithdrawals || 0
+            );
+
+
+        let restoredBalance =
+            commissionBalance;
+
+        let restoredPending =
+            pendingWithdrawals;
+
+
+        /*
+        ==================================================
+        RESTORE COMMISSION
+        ==================================================
+        */
+
+        if (!commissionRestored) {
+
+            restoredBalance =
+                commissionBalance + amount;
+        }
+
+
+        /*
+        ==================================================
+        RESTORE PENDING
+        ==================================================
+        */
+
+        if (!pendingRestored) {
+
+            restoredPending =
+                Math.max(
+                    0,
+                    pendingWithdrawals - amount
+                );
+        }
+
+
+        const now =
+            Date.now();
+
+
+        /*
+        ==================================================
+        UPDATE WITHDRAWAL
+        ==================================================
+        */
+
+        await withdrawalRef.update({
+
+            status:
+                "payment_failed",
+
+            paymentStatus:
+                "FAILED",
+
+            paymentFailedAt:
+                withdrawal.paymentFailedAt ||
+                now,
+
+            paymentFailureReason:
+                reason ||
+                withdrawal.paymentFailureReason ||
+                "",
+
+            commissionRestored:
+                true,
+
+            pendingWithdrawalRestored:
+                true,
+
+            updatedAt:
+                now
+        });
+
+
+        /*
+        ==================================================
+        UPDATE AGENT WALLET
+        ==================================================
+        */
+
+        await agentRef.update({
+
+            commissionBalance:
+                restoredBalance,
+
+            pendingWithdrawals:
+                restoredPending
+        });
+
+
+        /*
+        ==================================================
+        LEDGER
+        ==================================================
+        */
+
+        if (!commissionRestored) {
+
+            await LedgerManager.record({
+
+                type:
+                    LedgerTypes.WITHDRAWAL_REJECTED,
+
+                direction:
+                    LedgerDirection.CREDIT,
+
+                category:
+                    LedgerCategory.WITHDRAWAL,
+
+                amount,
+
+                reference:
+                    withdrawal.reference,
+
+                withdrawalId,
+
+                agentId:
+                    withdrawal.agentId,
+
+                description:
+                    "Failed payment — commission restored",
+
+                metadata: {
+
+                    reason,
+
+                    paymentMethod:
+                        withdrawal.paymentMethod ||
+                        "MPESA",
+
+                    paymentStatus:
+                        "FAILED",
+
+                    commissionRestored:
+                        true
+                }
+            });
+        }
+
+
+        /*
+        ==================================================
+        ACTIVITY
+        ==================================================
+        */
+
+        if (!commissionRestored) {
+
+            await ActivityManager
+                .createWithdrawalActivity(
+                    withdrawal.agentId,
+                    {
+
+                        withdrawalId,
+
+                        reference:
+                            withdrawal.reference,
+
+                        amount,
+
+                        status:
+                            "FAILED",
+
+                        reason,
+
+                        commissionRestored:
+                            true
+                    }
+                );
+        }
+
+
+        /*
+        ==================================================
+        CACHE
+        ==================================================
+        */
+
+        await CacheManager.refreshAgent(
+            withdrawal.agentId
+        );
+
+
         console.log(
-            "Payment already failed and wallet was fully restored:",
+            "======================================"
+        );
+
+        console.log(
+            "PAYMENT FAILED — WALLET RESTORED"
+        );
+
+        console.log(
+            "Withdrawal:",
             withdrawalId
         );
+
+        console.log(
+            "Agent:",
+            withdrawal.agentId
+        );
+
+        console.log(
+            "Amount:",
+            amount
+        );
+
+        console.log(
+            "Commission already restored:",
+            commissionRestored
+        );
+
+        console.log(
+            "Pending already restored:",
+            pendingRestored
+        );
+
+        console.log(
+            "New commission balance:",
+            restoredBalance
+        );
+
+        console.log(
+            "New pending withdrawals:",
+            restoredPending
+        );
+
+        console.log(
+            "======================================"
+        );
+
 
         return {
 
             success:
                 true,
 
-            alreadyProcessed:
-                true,
-
             message:
-                "Payment already failed and wallet was fully restored."
-        };
-    }
-
-    /*
-    ==========================================
-    CURRENT WALLET VALUES
-    ==========================================
-    */
-
-    const commissionBalance =
-        Number(
-            agent.commissionBalance || 0
-        );
-
-    const pendingWithdrawals =
-        Number(
-            agent.pendingWithdrawals || 0
-        );
-
-    /*
-    ==========================================
-    CALCULATE WALLET CHANGES
-    ==========================================
-    */
-
-    let restoredBalance =
-        commissionBalance;
-
-    let restoredPending =
-        pendingWithdrawals;
-
-    /*
-    ==========================================
-    RESTORE COMMISSION
-    ONLY IF NOT ALREADY RESTORED
-    ==========================================
-    */
-
-    if (!commissionRestored) {
-
-        restoredBalance =
-            commissionBalance + amount;
-    }
-
-    /*
-    ==========================================
-    RESTORE PENDING WITHDRAWAL
-    ONLY IF NOT ALREADY RESTORED
-    ==========================================
-    */
-
-    if (!pendingRestored) {
-
-        restoredPending =
-            Math.max(
-                0,
-                pendingWithdrawals - amount
-            );
-    }
-
-    const now =
-        Date.now();
-
-    /*
-    ==========================================
-    UPDATE WITHDRAWAL
-    ==========================================
-    */
-
-    await withdrawalRef.update({
-
-        status:
-            "payment_failed",
-
-        paymentStatus:
-            "FAILED",
-
-        paymentFailedAt:
-            withdrawal.paymentFailedAt ||
-            now,
-
-        paymentFailureReason:
-            reason ||
-            withdrawal.paymentFailureReason ||
-            "",
-
-        commissionRestored:
-            true,
-
-        pendingWithdrawalRestored:
-            true,
-
-        updatedAt:
-            now
-    });
-
-    /*
-    ==========================================
-    UPDATE AGENT WALLET
-    ==========================================
-    */
-
-    await agentRef.update({
-
-        commissionBalance:
-            restoredBalance,
-
-        pendingWithdrawals:
-            restoredPending
-    });
-
-    /*
-    ==========================================
-    FINANCIAL LEDGER
-    ONLY CREATE LEDGER ENTRY FOR A NEW
-    COMMISSION RESTORATION
-    ==========================================
-    */
-
-    if (!commissionRestored) {
-
-        await LedgerManager.record({
-
-            type:
-                LedgerTypes.WITHDRAWAL_REJECTED,
-
-            direction:
-                LedgerDirection.CREDIT,
-
-            category:
-                LedgerCategory.WITHDRAWAL,
-
-            amount,
-
-            reference:
-                withdrawal.reference,
+                "Payment failed and wallet restored.",
 
             withdrawalId,
 
-            agentId:
-                withdrawal.agentId,
+            amountRestored:
+                !commissionRestored
+                    ? amount
+                    : 0,
 
-            description:
-                "Failed payment — commission restored",
+            pendingWithdrawalRestored:
+                !pendingRestored
+                    ? amount
+                    : 0,
 
-            metadata: {
+            commissionBalance:
+                restoredBalance,
 
-                reason,
-
-                paymentMethod:
-                    withdrawal.paymentMethod ||
-                    "MPESA",
-
-                paymentStatus:
-                    "FAILED",
-
-                commissionRestored:
-                    true
-            }
-        });
+            pendingWithdrawals:
+                restoredPending
+        };
     }
-
-    /*
-    ==========================================
-    ACTIVITY
-    ONLY CREATE ACTIVITY FOR NEW FAILURE
-    ==========================================
-    */
-
-    if (!commissionRestored) {
-
-        await ActivityManager
-            .createWithdrawalActivity(
-                withdrawal.agentId,
-                {
-
-                    withdrawalId,
-
-                    reference:
-                        withdrawal.reference,
-
-                    amount,
-
-                    status:
-                        "FAILED",
-
-                    reason,
-
-                    commissionRestored:
-                        true
-                }
-            );
-    }
-
-    /*
-    ==========================================
-    REFRESH CACHE
-    ==========================================
-    */
-
-    await CacheManager.refreshAgent(
-        withdrawal.agentId
-    );
-
-    /*
-    ==========================================
-    LOG
-    ==========================================
-    */
-
-    console.log(
-        "======================================"
-    );
-
-    console.log(
-        "PAYMENT FAILED — WALLET RESTORED"
-    );
-
-    console.log(
-        "Withdrawal:",
-        withdrawalId
-    );
-
-    console.log(
-        "Agent:",
-        withdrawal.agentId
-    );
-
-    console.log(
-        "Amount:",
-        amount
-    );
-
-    console.log(
-        "Commission already restored:",
-        commissionRestored
-    );
-
-    console.log(
-        "Pending already restored:",
-        pendingRestored
-    );
-
-    console.log(
-        "New commission balance:",
-        restoredBalance
-    );
-
-    console.log(
-        "New pending withdrawals:",
-        restoredPending
-    );
-
-    console.log(
-        "======================================"
-    );
-
-    return {
-
-        success:
-            true,
-
-        message:
-            "Payment failed and wallet restored.",
-
-        withdrawalId,
-
-        amountRestored:
-            !commissionRestored
-                ? amount
-                : 0,
-
-        pendingWithdrawalRestored:
-            !pendingRestored
-                ? amount
-                : 0,
-
-        commissionBalance:
-            restoredBalance,
-
-        pendingWithdrawals:
-            restoredPending
-    };
-}
 
 
 
@@ -1466,14 +1406,8 @@ async markPaymentFailed(
     MARK WITHDRAWAL AS PAID
     ==================================================
 
-    IMPORTANT:
-
-    For PayPal, this should only be called after
-    PayPal confirms the payout has completed.
-
-    Do NOT call this merely because PayPal accepted
-    the payout request.
-    ==================================================
+    For PayPal this must only be called after
+    PayPal confirms SUCCESS/COMPLETED.
     */
 
     async markAsPaid(
@@ -1487,17 +1421,14 @@ async markPaymentFailed(
                 .ref("withdrawalRequests")
                 .child(withdrawalId);
 
-
         const snapshot =
             await withdrawalRef.get();
-
 
         if (!snapshot.exists()) {
             throw new Error(
                 "Withdrawal request not found."
             );
         }
-
 
         const withdrawal =
             snapshot.val();
@@ -1517,7 +1448,6 @@ async markPaymentFailed(
                 "Withdrawal already marked as paid:",
                 withdrawalId
             );
-
 
             return {
 
@@ -1540,7 +1470,6 @@ async markPaymentFailed(
             withdrawal.status !== "processing" &&
             withdrawal.status !== "approved"
         ) {
-
             throw new Error(
                 "Withdrawal cannot be marked as paid."
             );
@@ -1558,18 +1487,14 @@ async markPaymentFailed(
                 .ref("agents")
                 .child(withdrawal.agentId);
 
-
         const agentSnapshot =
             await agentRef.get();
 
-
         if (!agentSnapshot.exists()) {
-
             throw new Error(
                 "Agent not found."
             );
         }
-
 
         const agent =
             agentSnapshot.val();
@@ -1580,18 +1505,15 @@ async markPaymentFailed(
                 agent.pendingWithdrawals || 0
             );
 
-
         const totalWithdrawn =
             Number(
                 agent.totalWithdrawn || 0
             );
 
-
         const amount =
             Number(
                 withdrawal.amount || 0
             );
-
 
         const now =
             Date.now();
@@ -1617,7 +1539,17 @@ async markPaymentFailed(
             paymentCompletedAt:
                 now,
 
-            paymentFailureReason: "",    
+            /*
+            IMPORTANT:
+            Clear any stale failure reason.
+
+            This fixes records where PayPal previously
+            reported DENIED but a later successful
+            payout completed.
+            */
+
+            paymentFailureReason:
+                "",
 
             mpesaReceipt:
                 withdrawal.paymentMethod === "MPESA"
@@ -1631,8 +1563,35 @@ async markPaymentFailed(
 
             paypalTransactionId:
                 withdrawal.paymentMethod === "PAYPAL"
-                    ? providerReference || ""
-                    : withdrawal.paypalTransactionId || "",
+                    ? providerReference ||
+                        withdrawal.paypalTransactionId ||
+                        ""
+                    : withdrawal.paypalTransactionId ||
+                        "",
+
+            /*
+            A successful PayPal payout should have
+            SUCCESS as its final provider state when
+            this method is called from the status sync.
+            */
+
+            paypalBatchStatus:
+                withdrawal.paymentMethod === "PAYPAL"
+                    ? (
+                        withdrawal.paypalBatchStatus ||
+                        "SUCCESS"
+                    )
+                    : withdrawal.paypalBatchStatus ||
+                        "",
+
+            paypalTransactionStatus:
+                withdrawal.paymentMethod === "PAYPAL"
+                    ? (
+                        withdrawal.paypalTransactionStatus ||
+                        "SUCCESS"
+                    )
+                    : withdrawal.paypalTransactionStatus ||
+                        "",
 
             updatedAt:
                 now
@@ -1710,6 +1669,14 @@ async markPaymentFailed(
 
                 paypalTransactionId:
                     withdrawal.paypalTransactionId ||
+                    "",
+
+                paypalBatchStatus:
+                    withdrawal.paypalBatchStatus ||
+                    "",
+
+                paypalTransactionStatus:
+                    withdrawal.paypalTransactionStatus ||
                     ""
             }
         });
@@ -1780,6 +1747,7 @@ async markPaymentFailed(
     }
 
 
+
     /*
     ==================================================
     REJECT WITHDRAWAL
@@ -1796,27 +1764,21 @@ async markPaymentFailed(
                 .ref("withdrawalRequests")
                 .child(withdrawalId);
 
-
         const snapshot =
             await withdrawalRef.get();
 
-
         if (!snapshot.exists()) {
-
             throw new Error(
                 "Withdrawal request not found."
             );
         }
 
-
         const withdrawal =
             snapshot.val();
-
 
         if (
             withdrawal.status !== "pending"
         ) {
-
             throw new Error(
                 "Withdrawal has already been processed."
             );
@@ -1834,18 +1796,14 @@ async markPaymentFailed(
                 .ref("agents")
                 .child(withdrawal.agentId);
 
-
         const agentSnapshot =
             await agentRef.get();
 
-
         if (!agentSnapshot.exists()) {
-
             throw new Error(
                 "Agent not found."
             );
         }
-
 
         const agent =
             agentSnapshot.val();
@@ -1856,12 +1814,15 @@ async markPaymentFailed(
                 agent.commissionBalance || 0
             );
 
-
         const pending =
             Number(
                 agent.pendingWithdrawals || 0
             );
 
+        const amount =
+            Number(
+                withdrawal.amount || 0
+            );
 
         const now =
             Date.now();
@@ -1906,8 +1867,7 @@ async markPaymentFailed(
             category:
                 LedgerCategory.WITHDRAWAL,
 
-            amount:
-                withdrawal.amount,
+            amount,
 
             reference:
                 withdrawal.reference,
@@ -1936,18 +1896,12 @@ async markPaymentFailed(
         await agentRef.update({
 
             commissionBalance:
-                balance +
-                Number(
-                    withdrawal.amount || 0
-                ),
+                balance + amount,
 
             pendingWithdrawals:
                 Math.max(
                     0,
-                    pending -
-                    Number(
-                        withdrawal.amount || 0
-                    )
+                    pending - amount
                 )
         });
 
@@ -1968,8 +1922,7 @@ async markPaymentFailed(
                     reference:
                         withdrawal.reference,
 
-                    amount:
-                        withdrawal.amount,
+                    amount,
 
                     status:
                         "REJECTED",
@@ -2001,6 +1954,7 @@ async markPaymentFailed(
     }
 
 
+
     /*
     ==================================================
     AGENT WITHDRAWAL HISTORY
@@ -2016,11 +1970,9 @@ async markPaymentFailed(
                 .ref("withdrawalRequests")
                 .get();
 
-
         if (!snapshot.exists()) {
             return [];
         }
-
 
         const withdrawals = [];
 
@@ -2030,7 +1982,6 @@ async markPaymentFailed(
 
                 const withdrawal =
                     child.val();
-
 
                 if (
                     withdrawal.agentId ===
@@ -2064,6 +2015,7 @@ async markPaymentFailed(
     }
 
 
+
     /*
     ==================================================
     GET WITHDRAWAL DETAILS
@@ -2080,14 +2032,11 @@ async markPaymentFailed(
                 .child(withdrawalId)
                 .get();
 
-
         if (!snapshot.exists()) {
-
             throw new Error(
                 "Withdrawal request not found."
             );
         }
-
 
         const withdrawal =
             snapshot.val();
@@ -2157,10 +2106,8 @@ async markPaymentFailed(
             const agent =
                 agentSnapshot.val();
 
-
             email =
                 agent.email || "";
-
 
             payout =
                 agent.payout || {};
@@ -2171,6 +2118,16 @@ async markPaymentFailed(
         ==================================================
         RETURN DETAILS
         ==================================================
+
+        IMPORTANT:
+
+        The PayPal provider status fields are
+        explicitly returned here.
+
+        This is what fixes Android showing:
+
+        Batch Status: Not available
+        Transaction Status: Not available
         */
 
         return {
@@ -2183,14 +2140,18 @@ async markPaymentFailed(
                 withdrawal.agentId,
 
             agentName:
-                withdrawal.agentName,
+                withdrawal.agentName ||
+                "",
 
             reference:
-                withdrawal.reference,
+                withdrawal.reference ||
+                "",
 
 
             /*
-            Agent information
+            ==================================================
+            AGENT INFORMATION
+            ==================================================
             */
 
             email,
@@ -2203,7 +2164,9 @@ async markPaymentFailed(
 
 
             /*
-            Payment method
+            ==================================================
+            PAYMENT METHOD
+            ==================================================
             */
 
             paymentMethod:
@@ -2212,7 +2175,9 @@ async markPaymentFailed(
 
 
             /*
-            PayPal
+            ==================================================
+            PAYPAL
+            ==================================================
             */
 
             paypalEmail:
@@ -2244,9 +2209,27 @@ async markPaymentFailed(
                 withdrawal.paypalTransactionId ||
                 "",
 
+            /*
+            THIS WAS MISSING BEFORE.
+            */
+
+            paypalBatchStatus:
+                withdrawal.paypalBatchStatus ||
+                "",
 
             /*
-            Accounting
+            THIS WAS MISSING BEFORE.
+            */
+
+            paypalTransactionStatus:
+                withdrawal.paypalTransactionStatus ||
+                "",
+
+
+            /*
+            ==================================================
+            ACCOUNTING
+            ==================================================
             */
 
             amount:
@@ -2259,7 +2242,9 @@ async markPaymentFailed(
 
 
             /*
-            Status
+            ==================================================
+            STATUS
+            ==================================================
             */
 
             status:
@@ -2279,7 +2264,9 @@ async markPaymentFailed(
 
 
             /*
-            Timestamps
+            ==================================================
+            TIMESTAMPS
+            ==================================================
             */
 
             requestedAt:
@@ -2296,7 +2283,9 @@ async markPaymentFailed(
 
 
             /*
-            Admin
+            ==================================================
+            ADMIN
+            ==================================================
             */
 
             approvedById:
@@ -2312,7 +2301,9 @@ async markPaymentFailed(
 
 
             /*
-            M-Pesa
+            ==================================================
+            M-PESA
+            ==================================================
             */
 
             mpesaReceipt:
@@ -2321,7 +2312,9 @@ async markPaymentFailed(
 
 
             /*
-            Processing
+            ==================================================
+            PROCESSING
+            ==================================================
             */
 
             paymentAttemptedAt:
@@ -2337,6 +2330,7 @@ async markPaymentFailed(
                 null
         };
     }
+
 
 
     /*
@@ -2373,13 +2367,9 @@ async markPaymentFailed(
 
 
                 if (
-
                     status === "pending" ||
-
                     status === "approved" ||
-
                     status === "processing"
-
                 ) {
 
                     exists = true;
@@ -2390,6 +2380,7 @@ async markPaymentFailed(
 
         return exists;
     }
+
 
 
     /*
@@ -2455,3 +2446,4 @@ async markPaymentFailed(
 
 module.exports =
     new WithdrawalManager();
+
