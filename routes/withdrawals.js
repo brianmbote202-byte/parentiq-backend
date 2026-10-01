@@ -474,55 +474,77 @@ withdrawalSnapshot.forEach(child => {
 
 });
 
-            /*
-            ==========================================
-            EXTRACT PAYPAL STATUS
-            ==========================================
-            */
+           /* 
+==========================================
+EXTRACT PAYPAL STATUS
+==========================================
+*/
 
-            const batchStatus =
-                String(
-                    paypalStatus.batchStatus || ""
-                ).toUpperCase();
-
-
-            const items =
-                Array.isArray(
-                    paypalStatus.items
-                )
-                    ? paypalStatus.items
-                    : [];
+const batchStatus =
+    String(
+        paypalStatus.batchStatus || ""
+    ).toUpperCase();
 
 
-            const firstItem =
-                items.length > 0
-                    ? items[0]
-                    : null;
+const items =
+    Array.isArray(
+        paypalStatus.items
+    )
+        ? paypalStatus.items
+        : [];
 
 
-            const transactionStatus =
-                firstItem
-                    ? String(
-                        firstItem.transactionStatus || ""
-                    ).toUpperCase()
-                    : "";
+const firstItem =
+    items.length > 0
+        ? items[0]
+        : null;
 
 
-            const transactionId =
-                firstItem
-                    ? (
-                        firstItem.transactionId || ""
-                    )
-                    : "";
+/*
+PayPal may return these fields using
+snake_case in the payout item response.
+*/
+
+const transactionStatus =
+    firstItem
+        ? String(
+            firstItem.transaction_status ||
+            firstItem.transactionStatus ||
+            ""
+        ).toUpperCase()
+        : "";
 
 
-            const paypalItemId =
-                firstItem
-                    ? (
-                        firstItem.paypalItemId || ""
-                    )
-                    : "";
+const transactionId =
+    firstItem
+        ? (
+            firstItem.transaction_id ||
+            firstItem.transactionId ||
+            ""
+        )
+        : "";
 
+
+const paypalItemId =
+    firstItem
+        ? (
+            firstItem.payout_item_id ||
+            firstItem.paypalItemId ||
+            firstItem.payoutItemId ||
+            ""
+        )
+        : "";
+
+
+console.log(
+    "NORMALIZED PAYPAL STATUS:",
+    {
+        batchStatus,
+        transactionStatus,
+        transactionId,
+        paypalItemId
+    }
+);
 
             /*
             ==========================================
@@ -568,16 +590,20 @@ withdrawalSnapshot.forEach(child => {
                 ======================================
                 */
 
-                if (
-                    batchStatus === "COMPLETED" ||
-                    transactionStatus === "SUCCESS" ||
-                    transactionStatus === "COMPLETED"
-                ) {
+                const paypalSuccess =
+    batchStatus === "SUCCESS" ||
+    batchStatus === "COMPLETED" ||
+    transactionStatus === "SUCCESS" ||
+    transactionStatus === "COMPLETED";
+
+
+if (paypalSuccess)
+                 {
 
                     console.log(
-                        "PayPal payout COMPLETED:",
-                        withdrawalId
-                    );
+    "PayPal payout SUCCESS — marking withdrawal as PAID:",
+    withdrawalId
+);
 
 
                     /*
