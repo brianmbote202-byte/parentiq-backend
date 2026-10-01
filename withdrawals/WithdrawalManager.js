@@ -1617,6 +1617,8 @@ async markPaymentFailed(
             paymentCompletedAt:
                 now,
 
+            paymentFailureReason: "",    
+
             mpesaReceipt:
                 withdrawal.paymentMethod === "MPESA"
                     ? receipt || ""
