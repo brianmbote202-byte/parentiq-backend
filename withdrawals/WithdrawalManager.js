@@ -1,4 +1,3 @@
-
 const { db } = require("../firebase");
 
 const ActivityManager =
@@ -22,11 +21,53 @@ const LedgerCategory =
 const CacheManager =
     require("../cache/CacheManager");
 
-const PaymentManager =
-    require("../payments/PaymentManager");
-
 
 class WithdrawalManager {
+
+    /*
+    ==================================================
+    CONSTANTS
+    ==================================================
+    */
+
+    getWithdrawalRef(withdrawalId) {
+        return db
+            .ref("withdrawalRequests")
+            .child(withdrawalId);
+    }
+
+    getAgentRef(agentId) {
+        return db
+            .ref("agents")
+            .child(agentId);
+    }
+
+
+    /*
+    ==================================================
+    NORMALIZE PAYMENT METHOD
+    ==================================================
+    */
+
+    normalizePaymentMethod(paymentMethod) {
+        return String(paymentMethod || "MPESA")
+            .trim()
+            .toUpperCase();
+    }
+
+
+    /*
+    ==================================================
+    NORMALIZE STATUS
+    ==================================================
+    */
+
+    normalizeStatus(status) {
+        return String(status || "")
+            .trim()
+            .toLowerCase();
+    }
+
 
     /*
     ==================================================
@@ -47,9 +88,13 @@ class WithdrawalManager {
         amount = Number(amount);
 
         paymentMethod =
-            String(paymentMethod || "MPESA")
-                .trim()
-                .toUpperCase();
+            this.normalizePaymentMethod(
+                paymentMethod
+            );
+
+        phone =
+            String(phone || "")
+                .trim();
 
         paypalEmail =
             String(paypalEmail || "")
@@ -70,6 +115,12 @@ class WithdrawalManager {
         VALIDATION
         ==================================================
         */
+
+        if (!agentId) {
+            throw new Error(
+                "Agent ID is required."
+            );
+        }
 
         if (
             paymentMethod !== "MPESA" &&
@@ -127,7 +178,7 @@ class WithdrawalManager {
             }
 
             if (
-                isNaN(payoutAmount) ||
+                !Number.isFinite(payoutAmount) ||
                 payoutAmount <= 0
             ) {
                 throw new Error(
@@ -150,7 +201,7 @@ class WithdrawalManager {
         */
 
         if (
-            isNaN(amount) ||
+            !Number.isFinite(amount) ||
             amount <= 0
         ) {
             throw new Error(
@@ -182,9 +233,7 @@ class WithdrawalManager {
         */
 
         const agentRef =
-            db
-                .ref("agents")
-                .child(agentId);
+            this.getAgentRef(agentId);
 
         const snapshot =
             await agentRef.get();
@@ -264,11 +313,13 @@ class WithdrawalManager {
         STABLE PAYPAL SENDER BATCH ID
         ==================================================
 
-        Never use Date.now() here.
+        IMPORTANT:
 
-        The withdrawal ID is stable, so retrying
-        the same withdrawal uses the same sender
-        batch ID.
+        This MUST NOT use Date.now().
+
+        The withdrawal ID is stable, allowing the
+        same logical payout to retain the same
+        PayPal idempotency identity.
         */
 
         const paypalSenderBatchId =
@@ -276,6 +327,12 @@ class WithdrawalManager {
                 ? `PARENTIQ-${withdrawalRef.key}`
                 : "";
 
+
+        /*
+        ==================================================
+        WITHDRAWAL OBJECT
+        ==================================================
+        */
 
         const withdrawal = {
 
@@ -291,33 +348,25 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             PAYMENT METHOD
-            ==================================================
             */
 
             paymentMethod,
 
-            phone:
-                phone || "",
+            phone,
 
-            paypalEmail:
-                paypalEmail || "",
+            paypalEmail,
 
 
             /*
-            ==================================================
-            ACCOUNTING AMOUNT
-            ==================================================
+            ACCOUNTING
             */
 
             amount,
 
 
             /*
-            ==================================================
             PAYPAL PAYOUT
-            ==================================================
             */
 
             payoutAmount:
@@ -334,9 +383,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             BALANCE
-            ==================================================
             */
 
             availableBalanceBefore:
@@ -344,9 +391,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             STATUS
-            ==================================================
             */
 
             status:
@@ -366,9 +411,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             ADMIN
-            ==================================================
             */
 
             approvedBy:
@@ -385,9 +428,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             PAYMENT TRACKING
-            ==================================================
             */
 
             paymentStatus:
@@ -408,6 +449,24 @@ class WithdrawalManager {
             paymentReference:
                 "",
 
+            paymentAttemptCount:
+                0,
+
+            lastPaymentAttemptId:
+                "",
+
+            lastPaymentAttemptStatus:
+                "",
+
+            processingAt:
+                null,
+
+            reconciliationRequiredAt:
+                null,
+
+            reconciliationReason:
+                "",
+
             commissionRestored:
                 false,
 
@@ -416,9 +475,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             M-PESA
-            ==================================================
             */
 
             mpesaReceipt:
@@ -432,9 +489,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             PAYPAL
-            ==================================================
             */
 
             paypalBatchId:
@@ -446,11 +501,6 @@ class WithdrawalManager {
             paypalTransactionId:
                 "",
 
-            /*
-            These are important because the admin
-            dashboard displays them directly.
-            */
-
             paypalBatchStatus:
                 "",
 
@@ -459,9 +509,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             TIMESTAMPS
-            ==================================================
             */
 
             createdAt:
@@ -516,11 +564,7 @@ class WithdrawalManager {
 
                 paymentMethod,
 
-                phone:
-                    phone || "",
-
-                paypalEmail:
-                    paypalEmail || "",
+                phone,
 
                 payoutAmount:
                     paymentMethod === "PAYPAL"
@@ -556,7 +600,7 @@ class WithdrawalManager {
 
         /*
         ==================================================
-        REFRESH CACHE
+        CACHE
         ==================================================
         */
 
@@ -605,7 +649,6 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
     APPROVE WITHDRAWAL
@@ -618,9 +661,9 @@ class WithdrawalManager {
     ) {
 
         const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
+            this.getWithdrawalRef(
+                withdrawalId
+            );
 
         const snapshot =
             await withdrawalRef.get();
@@ -635,7 +678,9 @@ class WithdrawalManager {
             snapshot.val();
 
         if (
-            withdrawal.status !== "pending"
+            this.normalizeStatus(
+                withdrawal.status
+            ) !== "pending"
         ) {
             throw new Error(
                 "Withdrawal has already been processed."
@@ -645,7 +690,7 @@ class WithdrawalManager {
 
         /*
         ==================================================
-        LOAD ADMIN DETAILS
+        LOAD ADMIN
         ==================================================
         */
 
@@ -660,7 +705,9 @@ class WithdrawalManager {
                     .child(adminId)
                     .get();
 
-            if (adminSnapshot.exists()) {
+            if (
+                adminSnapshot.exists()
+            ) {
 
                 const admin =
                     adminSnapshot.val();
@@ -795,11 +842,243 @@ class WithdrawalManager {
     }
 
 
+    /*
+    ==================================================
+    CLAIM PAYMENT PROCESSING
+    ==================================================
+
+    ATOMIC PAYMENT LOCK.
+
+    Only:
+
+        approved
+        payment_failed
+
+    can enter processing.
+
+    Never automatically process:
+
+        reconciliation_required
+        processing
+        paid
+    */
+
+    async claimPaymentProcessing(
+        withdrawalId
+    ) {
+
+        const withdrawalRef =
+            this.getWithdrawalRef(
+                withdrawalId
+            );
+
+        let claimError =
+            null;
+
+
+        await withdrawalRef.transaction(
+            current => {
+
+                if (!current) {
+                    claimError =
+                        new Error(
+                            "Withdrawal request not found."
+                        );
+
+                    return;
+                }
+
+                const status =
+                    this.normalizeStatus(
+                        current.status
+                    );
+
+
+                /*
+                ALREADY PROCESSING
+                */
+
+                if (
+                    status === "processing"
+                ) {
+
+                    claimError =
+                        new Error(
+                            "Withdrawal is already being processed."
+                        );
+
+                    return;
+                }
+
+
+                /*
+                ALREADY PAID
+                */
+
+                if (
+                    status === "paid"
+                ) {
+
+                    claimError =
+                        new Error(
+                            "Withdrawal has already been paid."
+                        );
+
+                    return;
+                }
+
+
+                /*
+                RECONCILIATION REQUIRED
+                */
+
+                if (
+                    status ===
+                    "reconciliation_required"
+                ) {
+
+                    claimError =
+                        new Error(
+                            "Withdrawal requires payment reconciliation before it can be retried."
+                        );
+
+                    return;
+                }
+
+
+                /*
+                ONLY APPROVED / CONFIRMED FAILURE
+                */
+
+                if (
+                    status !== "approved" &&
+                    status !== "payment_failed"
+                ) {
+
+                    claimError =
+                        new Error(
+                            "Withdrawal cannot be processed."
+                        );
+
+                    return;
+                }
+
+
+                const now =
+                    Date.now();
+
+                const attemptCount =
+                    Number(
+                        current.paymentAttemptCount || 0
+                    ) + 1;
+
+
+                return {
+
+                    ...current,
+
+                    status:
+                        "processing",
+
+                    paymentStatus:
+                        "PROCESSING",
+
+                    processingAt:
+                        now,
+
+                    paymentAttemptedAt:
+                        now,
+
+                    paymentAttemptCount:
+                        attemptCount,
+
+                    paymentFailureReason:
+                        "",
+
+                    reconciliationRequiredAt:
+                        null,
+
+                    reconciliationReason:
+                        "",
+
+                    lastPaymentAttemptStatus:
+                        "PROCESSING",
+
+                    updatedAt:
+                        now
+                };
+            }
+        );
+
+
+        if (claimError) {
+            throw claimError;
+        }
+
+
+        /*
+        ==================================================
+        VERIFY
+        ==================================================
+        */
+
+        const finalSnapshot =
+            await withdrawalRef.get();
+
+        if (!finalSnapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+        const finalWithdrawal =
+            finalSnapshot.val();
+
+        if (
+            this.normalizeStatus(
+                finalWithdrawal.status
+            ) !== "processing"
+        ) {
+            throw new Error(
+                "Withdrawal could not be claimed for payment processing."
+            );
+        }
+
+
+        console.log(
+            "Payment processing CLAIMED:",
+            withdrawalId
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            withdrawal: {
+
+                id:
+                    withdrawalId,
+
+                ...finalWithdrawal
+            }
+        };
+    }
+
 
     /*
     ==================================================
     MARK M-PESA PROCESSING
     ==================================================
+
+    LEGACY METHOD.
+
+    New routes should use:
+
+        claimPaymentProcessing()
+
+    before sending money.
     */
 
     async markProcessing(
@@ -809,9 +1088,9 @@ class WithdrawalManager {
     ) {
 
         const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
+            this.getWithdrawalRef(
+                withdrawalId
+            );
 
         const snapshot =
             await withdrawalRef.get();
@@ -827,17 +1106,43 @@ class WithdrawalManager {
 
 
         if (
-            withdrawal.paymentMethod === "PAYPAL"
+            this.normalizePaymentMethod(
+                withdrawal.paymentMethod
+            ) === "PAYPAL"
         ) {
             throw new Error(
-                "Use markPayPalProcessing() for PayPal withdrawals."
+                "Use PayPal processing methods for PayPal withdrawals."
             );
         }
 
 
+        const status =
+            this.normalizeStatus(
+                withdrawal.status
+            );
+
+
         if (
-            withdrawal.status !== "approved" &&
-            withdrawal.status !== "payment_failed"
+            status === "processing"
+        ) {
+
+            return {
+
+                success:
+                    true,
+
+                alreadyProcessing:
+                    true,
+
+                message:
+                    "Withdrawal is already processing."
+            };
+        }
+
+
+        if (
+            status !== "approved" &&
+            status !== "payment_failed"
         ) {
             throw new Error(
                 "Withdrawal cannot be processed."
@@ -848,6 +1153,7 @@ class WithdrawalManager {
         const now =
             Date.now();
 
+
         await withdrawalRef.update({
 
             status:
@@ -857,9 +1163,11 @@ class WithdrawalManager {
                 "PROCESSING",
 
             processingAt:
+                withdrawal.processingAt ||
                 now,
 
             paymentAttemptedAt:
+                withdrawal.paymentAttemptedAt ||
                 now,
 
             conversationId:
@@ -867,6 +1175,15 @@ class WithdrawalManager {
 
             originatorConversationId:
                 originatorConversationId || "",
+
+            paymentFailureReason:
+                "",
+
+            reconciliationRequiredAt:
+                null,
+
+            reconciliationReason:
+                "",
 
             updatedAt:
                 now
@@ -890,7 +1207,6 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
     MARK PAYPAL PROCESSING
@@ -904,9 +1220,9 @@ class WithdrawalManager {
     ) {
 
         const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
+            this.getWithdrawalRef(
+                withdrawalId
+            );
 
         const snapshot =
             await withdrawalRef.get();
@@ -922,7 +1238,9 @@ class WithdrawalManager {
 
 
         if (
-            withdrawal.paymentMethod !== "PAYPAL"
+            this.normalizePaymentMethod(
+                withdrawal.paymentMethod
+            ) !== "PAYPAL"
         ) {
             throw new Error(
                 "Withdrawal is not a PayPal withdrawal."
@@ -931,8 +1249,45 @@ class WithdrawalManager {
 
 
         if (
-            withdrawal.status !== "approved" &&
-            withdrawal.status !== "payment_failed"
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "paid"
+        ) {
+
+            return {
+
+                success:
+                    true,
+
+                alreadyPaid:
+                    true,
+
+                message:
+                    "Withdrawal is already paid."
+            };
+        }
+
+
+        if (
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "reconciliation_required"
+        ) {
+            throw new Error(
+                "Withdrawal requires reconciliation before processing."
+            );
+        }
+
+
+        const status =
+            this.normalizeStatus(
+                withdrawal.status
+            );
+
+        if (
+            status !== "approved" &&
+            status !== "payment_failed" &&
+            status !== "processing"
         ) {
             throw new Error(
                 "Withdrawal cannot be processed."
@@ -953,9 +1308,11 @@ class WithdrawalManager {
                 "PROCESSING",
 
             processingAt:
+                withdrawal.processingAt ||
                 now,
 
             paymentAttemptedAt:
+                withdrawal.paymentAttemptedAt ||
                 now,
 
             paypalBatchId:
@@ -968,26 +1325,30 @@ class WithdrawalManager {
                 withdrawal.paypalItemId ||
                 "",
 
-            /*
-            A new payment attempt should not
-            inherit a previous provider status.
-            */
-
             paypalBatchStatus:
-                "",
+                paypalBatchId
+                    ? withdrawal.paypalBatchStatus || ""
+                    : "",
 
             paypalTransactionStatus:
+                withdrawal.paypalTransactionStatus ||
                 "",
+
+            paymentFailureReason:
+                "",
+
+            reconciliationRequiredAt:
+                null,
+
+            reconciliationReason:
+                "",
+
+            lastPaymentAttemptStatus:
+                "PROCESSING",
 
             updatedAt:
                 now
         });
-
-
-        console.log(
-            "PayPal withdrawal marked as PROCESSING:",
-            withdrawalId
-        );
 
 
         return {
@@ -1001,28 +1362,183 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
-    MARK PAYMENT FAILED
+    RECORD PAYPAL SUBMISSION
     ==================================================
 
-    IMPORTANT:
+    Called after PayPal returns a payout batch ID.
 
-    This method is idempotent.
-
-    The commission is restored only once.
+    This NEVER changes wallet balances.
     */
 
-    async markPaymentFailed(
+    async recordPayPalSubmission(
         withdrawalId,
-        reason = ""
+        {
+            paymentId = "",
+            paypalBatchId = "",
+            paypalItemId = "",
+            paypalBatchStatus = "",
+            paymentReference = ""
+        } = {}
     ) {
 
         const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
+            this.getWithdrawalRef(
+                withdrawalId
+            );
+
+        const snapshot =
+            await withdrawalRef.get();
+
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+        const withdrawal =
+            snapshot.val();
+
+
+        if (
+            this.normalizePaymentMethod(
+                withdrawal.paymentMethod
+            ) !== "PAYPAL"
+        ) {
+            throw new Error(
+                "Withdrawal is not a PayPal withdrawal."
+            );
+        }
+
+
+        if (
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "paid"
+        ) {
+
+            return {
+
+                success:
+                    true,
+
+                alreadyPaid:
+                    true
+            };
+        }
+
+
+        const now =
+            Date.now();
+
+
+        await withdrawalRef.update({
+
+            status:
+                "processing",
+
+            paymentStatus:
+                "PROCESSING",
+
+            processingAt:
+                withdrawal.processingAt ||
+                now,
+
+            paymentAttemptedAt:
+                withdrawal.paymentAttemptedAt ||
+                now,
+
+            paypalBatchId:
+                paypalBatchId ||
+                withdrawal.paypalBatchId ||
+                "",
+
+            paypalItemId:
+                paypalItemId ||
+                withdrawal.paypalItemId ||
+                "",
+
+            paypalBatchStatus:
+                paypalBatchStatus ||
+                withdrawal.paypalBatchStatus ||
+                "",
+
+            paymentReference:
+                paymentReference ||
+                withdrawal.paymentReference ||
+                "",
+
+            lastPaymentAttemptId:
+                paymentId ||
+                withdrawal.lastPaymentAttemptId ||
+                "",
+
+            lastPaymentAttemptStatus:
+                "PROCESSING",
+
+            paymentFailureReason:
+                "",
+
+            reconciliationRequiredAt:
+                null,
+
+            reconciliationReason:
+                "",
+
+            updatedAt:
+                now
+        });
+
+
+        return {
+
+            success:
+                true,
+
+            withdrawalId,
+
+            paypalBatchId:
+                paypalBatchId ||
+                withdrawal.paypalBatchId ||
+                "",
+
+            paypalItemId:
+                paypalItemId ||
+                withdrawal.paypalItemId ||
+                ""
+        };
+    }
+
+
+    /*
+    ==================================================
+    MARK RECONCILIATION REQUIRED
+    ==================================================
+
+    CRITICAL FINANCIAL SAFETY METHOD.
+
+    NEVER restores wallet funds.
+
+    Used when provider outcome is unknown.
+    */
+
+    async markReconciliationRequired(
+        withdrawalId,
+        reason = "",
+        {
+            paymentId = "",
+            paypalBatchId = "",
+            paypalItemId = "",
+            paypalBatchStatus = "",
+            paypalTransactionStatus = ""
+        } = {}
+    ) {
+
+        const withdrawalRef =
+            this.getWithdrawalRef(
+                withdrawalId
+            );
 
         const snapshot =
             await withdrawalRef.get();
@@ -1039,14 +1555,305 @@ class WithdrawalManager {
 
         /*
         ==================================================
+        ALREADY PAID
+        ==================================================
+        */
+
+        if (
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "paid"
+        ) {
+
+            await withdrawalRef.update({
+
+                paymentStatus:
+                    "SUCCESS",
+
+                paymentFailureReason:
+                    "",
+
+                reconciliationRequiredAt:
+                    null,
+
+                reconciliationReason:
+                    "",
+
+                lastPaymentAttemptStatus:
+                    "SUCCESS",
+
+                updatedAt:
+                    Date.now()
+            });
+
+
+            return {
+
+                success:
+                    true,
+
+                alreadyPaid:
+                    true
+            };
+        }
+
+
+        /*
+        ==================================================
+        ALREADY CONFIRMED FAILED
+        ==================================================
+        */
+
+        if (
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "payment_failed" &&
+            withdrawal.commissionRestored === true
+        ) {
+
+            return {
+
+                success:
+                    true,
+
+                alreadyFailed:
+                    true,
+
+                message:
+                    "Withdrawal has already been confirmed as failed."
+            };
+        }
+
+
+        const now =
+            Date.now();
+
+
+        await withdrawalRef.update({
+
+            status:
+                "reconciliation_required",
+
+            paymentStatus:
+                "RECONCILIATION_REQUIRED",
+
+            /*
+            UNKNOWN IS NOT THE SAME AS FAILED.
+            */
+
+            paymentFailureReason:
+                "",
+
+            reconciliationRequiredAt:
+                now,
+
+            reconciliationReason:
+                reason ||
+                "Payment provider outcome is unknown.",
+
+            lastPaymentAttemptId:
+                paymentId ||
+                withdrawal.lastPaymentAttemptId ||
+                "",
+
+            lastPaymentAttemptStatus:
+                "RECONCILIATION_REQUIRED",
+
+            paypalBatchId:
+                paypalBatchId ||
+                withdrawal.paypalBatchId ||
+                "",
+
+            paypalItemId:
+                paypalItemId ||
+                withdrawal.paypalItemId ||
+                "",
+
+            paypalBatchStatus:
+                paypalBatchStatus ||
+                withdrawal.paypalBatchStatus ||
+                "",
+
+            paypalTransactionStatus:
+                paypalTransactionStatus ||
+                withdrawal.paypalTransactionStatus ||
+                "",
+
+            updatedAt:
+                now
+        });
+
+
+        /*
+        ==================================================
+        DO NOT RESTORE WALLET
+        ==================================================
+        */
+
+        await CacheManager.refreshAgent(
+            withdrawal.agentId
+        );
+
+
+        console.warn(
+            "======================================"
+        );
+
+        console.warn(
+            "PAYMENT RECONCILIATION REQUIRED"
+        );
+
+        console.warn(
+            "Withdrawal:",
+            withdrawalId
+        );
+
+        console.warn(
+            "Provider:",
+            withdrawal.paymentMethod
+        );
+
+        console.warn(
+            "Reason:",
+            reason ||
+            "Unknown provider outcome"
+        );
+
+        console.warn(
+            "Wallet NOT restored."
+        );
+
+        console.warn(
+            "======================================"
+        );
+
+
+        return {
+
+            success:
+                true,
+
+            reconciliationRequired:
+                true,
+
+            withdrawalId,
+
+            message:
+                "Payment outcome is unknown. Wallet remains reserved until reconciliation."
+        };
+    }
+
+
+    /*
+    ==================================================
+    MARK PAYMENT FAILED
+    ==================================================
+
+    ONLY for CONFIRMED provider failure.
+
+    NEVER use for an ambiguous provider response.
+    */
+
+    async markPaymentFailed(
+        withdrawalId,
+        reason = ""
+    ) {
+
+        const withdrawalRef =
+            this.getWithdrawalRef(
+                withdrawalId
+            );
+
+        const snapshot =
+            await withdrawalRef.get();
+
+        if (!snapshot.exists()) {
+            throw new Error(
+                "Withdrawal request not found."
+            );
+        }
+
+        const withdrawal =
+            snapshot.val();
+
+
+        /*
+        ==================================================
+        ALREADY PAID
+        ==================================================
+        */
+
+        if (
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "paid"
+        ) {
+
+            await withdrawalRef.update({
+
+                paymentStatus:
+                    "SUCCESS",
+
+                paymentFailureReason:
+                    "",
+
+                reconciliationRequiredAt:
+                    null,
+
+                reconciliationReason:
+                    "",
+
+                lastPaymentAttemptStatus:
+                    "SUCCESS",
+
+                updatedAt:
+                    Date.now()
+            });
+
+
+            return {
+
+                success:
+                    true,
+
+                alreadyPaid:
+                    true,
+
+                message:
+                    "Withdrawal is already paid."
+            };
+        }
+
+
+        /*
+        ==================================================
+        NEVER AUTO-FAIL RECONCILIATION STATE
+        ==================================================
+        */
+
+        if (
+            this.normalizeStatus(
+                withdrawal.status
+            ) ===
+            "reconciliation_required"
+        ) {
+
+            throw new Error(
+                "Cannot mark reconciliation-required payment as failed without confirmed provider status."
+            );
+        }
+
+
+        /*
+        ==================================================
         LOAD AGENT
         ==================================================
         */
 
         const agentRef =
-            db
-                .ref("agents")
-                .child(withdrawal.agentId);
+            this.getAgentRef(
+                withdrawal.agentId
+            );
 
         const agentSnapshot =
             await agentRef.get();
@@ -1072,7 +1879,10 @@ class WithdrawalManager {
                 withdrawal.amount || 0
             );
 
-        if (amount <= 0) {
+        if (
+            !Number.isFinite(amount) ||
+            amount <= 0
+        ) {
             throw new Error(
                 "Invalid withdrawal amount."
             );
@@ -1094,20 +1904,35 @@ class WithdrawalManager {
 
         /*
         ==================================================
-        ALREADY COMPLETELY PROCESSED
+        ALREADY FULLY RESTORED
         ==================================================
         */
 
         if (
-            withdrawal.status === "payment_failed" &&
-            commissionRestored === true &&
-            pendingRestored === true
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "payment_failed" &&
+            commissionRestored &&
+            pendingRestored
         ) {
 
-            console.log(
-                "Payment already failed and wallet was fully restored:",
-                withdrawalId
-            );
+            await withdrawalRef.update({
+
+                paymentStatus:
+                    "FAILED",
+
+                paymentFailureReason:
+                    reason ||
+                    withdrawal.paymentFailureReason ||
+                    "",
+
+                lastPaymentAttemptStatus:
+                    "FAILED",
+
+                updatedAt:
+                    Date.now()
+            });
+
 
             return {
 
@@ -1118,14 +1943,14 @@ class WithdrawalManager {
                     true,
 
                 message:
-                    "Payment already failed and wallet was fully restored."
+                    "Payment already failed and wallet was restored."
             };
         }
 
 
         /*
         ==================================================
-        CURRENT WALLET VALUES
+        CURRENT WALLET
         ==================================================
         */
 
@@ -1201,13 +2026,22 @@ class WithdrawalManager {
             paymentFailureReason:
                 reason ||
                 withdrawal.paymentFailureReason ||
-                "",
+                "Payment provider confirmed the payout failed.",
 
             commissionRestored:
                 true,
 
             pendingWithdrawalRestored:
                 true,
+
+            reconciliationRequiredAt:
+                null,
+
+            reconciliationReason:
+                "",
+
+            lastPaymentAttemptStatus:
+                "FAILED",
 
             updatedAt:
                 now
@@ -1347,23 +2181,13 @@ class WithdrawalManager {
         );
 
         console.log(
-            "Commission already restored:",
-            commissionRestored
+            "Commission restored:",
+            !commissionRestored
         );
 
         console.log(
-            "Pending already restored:",
-            pendingRestored
-        );
-
-        console.log(
-            "New commission balance:",
-            restoredBalance
-        );
-
-        console.log(
-            "New pending withdrawals:",
-            restoredPending
+            "Pending restored:",
+            !pendingRestored
         );
 
         console.log(
@@ -1400,26 +2224,31 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
     MARK WITHDRAWAL AS PAID
     ==================================================
 
-    For PayPal this must only be called after
-    PayPal confirms SUCCESS/COMPLETED.
+    PayPal:
+
+        ONLY after confirmed SUCCESS/COMPLETED.
+
+    M-Pesa:
+
+        after confirmed successful receipt.
     */
 
     async markAsPaid(
         withdrawalId,
         receipt = "",
-        providerReference = ""
+        providerReference = "",
+        providerData = {}
     ) {
 
         const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
+            this.getWithdrawalRef(
+                withdrawalId
+            );
 
         const snapshot =
             await withdrawalRef.get();
@@ -1436,26 +2265,134 @@ class WithdrawalManager {
 
         /*
         ==================================================
-        PREVENT DUPLICATE COMPLETION
+        PROVIDER DATA
         ==================================================
         */
 
+        const paypalBatchId =
+            providerData.paypalBatchId ||
+            withdrawal.paypalBatchId ||
+            "";
+
+        const paypalItemId =
+            providerData.paypalItemId ||
+            withdrawal.paypalItemId ||
+            "";
+
+        const paypalTransactionId =
+            providerData.paypalTransactionId ||
+            withdrawal.paypalTransactionId ||
+            providerReference ||
+            "";
+
+        const paypalBatchStatus =
+            providerData.paypalBatchStatus ||
+            withdrawal.paypalBatchStatus ||
+            (
+                withdrawal.paymentMethod === "PAYPAL"
+                    ? "SUCCESS"
+                    : ""
+            );
+
+        const paypalTransactionStatus =
+            providerData.paypalTransactionStatus ||
+            withdrawal.paypalTransactionStatus ||
+            (
+                withdrawal.paymentMethod === "PAYPAL"
+                    ? "SUCCESS"
+                    : ""
+            );
+
+
+        /*
+        ==================================================
+        ALREADY PAID
+        ==================================================
+
+        CRITICAL:
+
+        Do not return before synchronizing
+        provider information.
+        */
+
         if (
-            withdrawal.status === "paid"
+            this.normalizeStatus(
+                withdrawal.status
+            ) === "paid"
         ) {
 
-            console.log(
-                "Withdrawal already marked as paid:",
-                withdrawalId
+            const now =
+                Date.now();
+
+            await withdrawalRef.update({
+
+                paymentStatus:
+                    "SUCCESS",
+
+                paymentFailureReason:
+                    "",
+
+                paymentCompletedAt:
+                    withdrawal.paymentCompletedAt ||
+                    withdrawal.paidAt ||
+                    now,
+
+                paymentReference:
+                    providerReference ||
+                    withdrawal.paymentReference ||
+                    receipt ||
+                    "",
+
+                mpesaReceipt:
+                    withdrawal.paymentMethod === "MPESA"
+                        ? (
+                            receipt ||
+                            withdrawal.mpesaReceipt ||
+                            ""
+                        )
+                        : "",
+
+                paypalBatchId,
+
+                paypalItemId,
+
+                paypalTransactionId,
+
+                paypalBatchStatus,
+
+                paypalTransactionStatus,
+
+                reconciliationRequiredAt:
+                    null,
+
+                reconciliationReason:
+                    "",
+
+                lastPaymentAttemptStatus:
+                    "SUCCESS",
+
+                updatedAt:
+                    now
+            });
+
+
+            await CacheManager.refreshAgent(
+                withdrawal.agentId
             );
+
 
             return {
 
                 success:
                     true,
 
+                alreadyPaid:
+                    true,
+
                 message:
-                    "Withdrawal already marked as paid."
+                    "Withdrawal was already paid; provider information synchronized.",
+
+                withdrawalId
             };
         }
 
@@ -1466,10 +2403,16 @@ class WithdrawalManager {
         ==================================================
         */
 
+        const status =
+            this.normalizeStatus(
+                withdrawal.status
+            );
+
         if (
-            withdrawal.status !== "processing" &&
-            withdrawal.status !== "approved"
+            status !== "processing" &&
+            status !== "approved"
         ) {
+
             throw new Error(
                 "Withdrawal cannot be marked as paid."
             );
@@ -1483,9 +2426,9 @@ class WithdrawalManager {
         */
 
         const agentRef =
-            db
-                .ref("agents")
-                .child(withdrawal.agentId);
+            this.getAgentRef(
+                withdrawal.agentId
+            );
 
         const agentSnapshot =
             await agentRef.get();
@@ -1499,6 +2442,12 @@ class WithdrawalManager {
         const agent =
             agentSnapshot.val();
 
+
+        /*
+        ==================================================
+        ACCOUNTING
+        ==================================================
+        */
 
         const pending =
             Number(
@@ -1514,6 +2463,16 @@ class WithdrawalManager {
             Number(
                 withdrawal.amount || 0
             );
+
+        if (
+            !Number.isFinite(amount) ||
+            amount <= 0
+        ) {
+            throw new Error(
+                "Invalid withdrawal amount."
+            );
+        }
+
 
         const now =
             Date.now();
@@ -1534,64 +2493,49 @@ class WithdrawalManager {
                 "SUCCESS",
 
             paidAt:
+                withdrawal.paidAt ||
                 now,
 
             paymentCompletedAt:
+                withdrawal.paymentCompletedAt ||
                 now,
-
-            /*
-            IMPORTANT:
-            Clear any stale failure reason.
-
-            This fixes records where PayPal previously
-            reported DENIED but a later successful
-            payout completed.
-            */
 
             paymentFailureReason:
                 "",
 
+            reconciliationRequiredAt:
+                null,
+
+            reconciliationReason:
+                "",
+
             mpesaReceipt:
                 withdrawal.paymentMethod === "MPESA"
-                    ? receipt || ""
+                    ? (
+                        receipt ||
+                        withdrawal.mpesaReceipt ||
+                        ""
+                    )
                     : "",
 
             paymentReference:
                 providerReference ||
                 receipt ||
+                withdrawal.paymentReference ||
                 "",
 
-            paypalTransactionId:
-                withdrawal.paymentMethod === "PAYPAL"
-                    ? providerReference ||
-                        withdrawal.paypalTransactionId ||
-                        ""
-                    : withdrawal.paypalTransactionId ||
-                        "",
+            paypalBatchId,
 
-            /*
-            A successful PayPal payout should have
-            SUCCESS as its final provider state when
-            this method is called from the status sync.
-            */
+            paypalItemId,
 
-            paypalBatchStatus:
-                withdrawal.paymentMethod === "PAYPAL"
-                    ? (
-                        withdrawal.paypalBatchStatus ||
-                        "SUCCESS"
-                    )
-                    : withdrawal.paypalBatchStatus ||
-                        "",
+            paypalTransactionId,
 
-            paypalTransactionStatus:
-                withdrawal.paymentMethod === "PAYPAL"
-                    ? (
-                        withdrawal.paypalTransactionStatus ||
-                        "SUCCESS"
-                    )
-                    : withdrawal.paypalTransactionStatus ||
-                        "",
+            paypalBatchStatus,
+
+            paypalTransactionStatus,
+
+            lastPaymentAttemptStatus:
+                "SUCCESS",
 
             updatedAt:
                 now
@@ -1659,25 +2603,15 @@ class WithdrawalManager {
                     withdrawal.paymentMethod ||
                     "MPESA",
 
-                paypalBatchId:
-                    withdrawal.paypalBatchId ||
-                    "",
+                paypalBatchId,
 
-                paypalItemId:
-                    withdrawal.paypalItemId ||
-                    "",
+                paypalItemId,
 
-                paypalTransactionId:
-                    withdrawal.paypalTransactionId ||
-                    "",
+                paypalTransactionId,
 
-                paypalBatchStatus:
-                    withdrawal.paypalBatchStatus ||
-                    "",
+                paypalBatchStatus,
 
-                paypalTransactionStatus:
-                    withdrawal.paypalTransactionStatus ||
-                    ""
+                paypalTransactionStatus
             }
         });
 
@@ -1747,7 +2681,6 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
     REJECT WITHDRAWAL
@@ -1760,9 +2693,9 @@ class WithdrawalManager {
     ) {
 
         const withdrawalRef =
-            db
-                .ref("withdrawalRequests")
-                .child(withdrawalId);
+            this.getWithdrawalRef(
+                withdrawalId
+            );
 
         const snapshot =
             await withdrawalRef.get();
@@ -1776,8 +2709,11 @@ class WithdrawalManager {
         const withdrawal =
             snapshot.val();
 
+
         if (
-            withdrawal.status !== "pending"
+            this.normalizeStatus(
+                withdrawal.status
+            ) !== "pending"
         ) {
             throw new Error(
                 "Withdrawal has already been processed."
@@ -1792,9 +2728,9 @@ class WithdrawalManager {
         */
 
         const agentRef =
-            db
-                .ref("agents")
-                .child(withdrawal.agentId);
+            this.getAgentRef(
+                withdrawal.agentId
+            );
 
         const agentSnapshot =
             await agentRef.get();
@@ -1824,6 +2760,15 @@ class WithdrawalManager {
                 withdrawal.amount || 0
             );
 
+        if (
+            !Number.isFinite(amount) ||
+            amount <= 0
+        ) {
+            throw new Error(
+                "Invalid withdrawal amount."
+            );
+        }
+
         const now =
             Date.now();
 
@@ -1844,6 +2789,15 @@ class WithdrawalManager {
 
             rejectionReason:
                 reason,
+
+            commissionRestored:
+                true,
+
+            pendingWithdrawalRestored:
+                true,
+
+            paymentStatus:
+                "FAILED",
 
             updatedAt:
                 now
@@ -1954,7 +2908,6 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
     AGENT WITHDRAWAL HISTORY
@@ -1968,6 +2921,8 @@ class WithdrawalManager {
         const snapshot =
             await db
                 .ref("withdrawalRequests")
+                .orderByChild("agentId")
+                .equalTo(agentId)
                 .get();
 
         if (!snapshot.exists()) {
@@ -1983,19 +2938,13 @@ class WithdrawalManager {
                 const withdrawal =
                     child.val();
 
-                if (
-                    withdrawal.agentId ===
-                    agentId
-                ) {
+                withdrawals.push({
 
-                    withdrawals.push({
+                    id:
+                        child.key,
 
-                        id:
-                            child.key,
-
-                        ...withdrawal
-                    });
-                }
+                    ...withdrawal
+                });
             }
         );
 
@@ -2015,7 +2964,6 @@ class WithdrawalManager {
     }
 
 
-
     /*
     ==================================================
     GET WITHDRAWAL DETAILS
@@ -2027,9 +2975,10 @@ class WithdrawalManager {
     ) {
 
         const snapshot =
-            await db
-                .ref("withdrawalRequests")
-                .child(withdrawalId)
+            await this
+                .getWithdrawalRef(
+                    withdrawalId
+                )
                 .get();
 
         if (!snapshot.exists()) {
@@ -2049,20 +2998,23 @@ class WithdrawalManager {
         */
 
         const agentSnapshot =
-            await db
-                .ref("agents")
-                .child(withdrawal.agentId)
+            await this
+                .getAgentRef(
+                    withdrawal.agentId
+                )
                 .get();
 
 
         /*
         ==================================================
-        LOAD APPROVING ADMIN
+        LOAD ADMIN
         ==================================================
         */
 
-        let approvedByName = "";
-
+        let approvedByName =
+            withdrawal.approvedByName ||
+            withdrawal.approvedBy ||
+            "";
 
         if (
             withdrawal.approvedById
@@ -2076,15 +3028,19 @@ class WithdrawalManager {
                     )
                     .get();
 
-
             if (
                 adminSnapshot.exists()
             ) {
 
+                const admin =
+                    adminSnapshot.val();
+
                 approvedByName =
-                    adminSnapshot
-                        .val()
-                        .fullName || "";
+                    admin.fullName ||
+                    admin.name ||
+                    admin.email ||
+                    approvedByName ||
+                    "";
             }
         }
 
@@ -2097,7 +3053,6 @@ class WithdrawalManager {
 
         let email = "";
         let payout = {};
-
 
         if (
             agentSnapshot.exists()
@@ -2116,18 +3071,8 @@ class WithdrawalManager {
 
         /*
         ==================================================
-        RETURN DETAILS
+        RETURN
         ==================================================
-
-        IMPORTANT:
-
-        The PayPal provider status fields are
-        explicitly returned here.
-
-        This is what fixes Android showing:
-
-        Batch Status: Not available
-        Transaction Status: Not available
         */
 
         return {
@@ -2149,24 +3094,22 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
-            AGENT INFORMATION
-            ==================================================
+            AGENT
             */
 
             email,
 
             phone:
-                withdrawal.phone || "",
+                withdrawal.phone ||
+                "",
 
             verified:
-                payout.verified || false,
+                payout.verified ||
+                false,
 
 
             /*
-            ==================================================
             PAYMENT METHOD
-            ==================================================
             */
 
             paymentMethod:
@@ -2175,9 +3118,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             PAYPAL
-            ==================================================
             */
 
             paypalEmail:
@@ -2209,17 +3150,9 @@ class WithdrawalManager {
                 withdrawal.paypalTransactionId ||
                 "",
 
-            /*
-            THIS WAS MISSING BEFORE.
-            */
-
             paypalBatchStatus:
                 withdrawal.paypalBatchStatus ||
                 "",
-
-            /*
-            THIS WAS MISSING BEFORE.
-            */
 
             paypalTransactionStatus:
                 withdrawal.paypalTransactionStatus ||
@@ -2227,9 +3160,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             ACCOUNTING
-            ==================================================
             */
 
             amount:
@@ -2242,9 +3173,7 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
             STATUS
-            ==================================================
             */
 
             status:
@@ -2264,9 +3193,55 @@ class WithdrawalManager {
 
 
             /*
-            ==================================================
+            RECONCILIATION
+            */
+
+            reconciliationRequired:
+                this.normalizeStatus(
+                    withdrawal.status
+                ) ===
+                "reconciliation_required",
+
+            reconciliationRequiredAt:
+                withdrawal.reconciliationRequiredAt ||
+                null,
+
+            reconciliationReason:
+                withdrawal.reconciliationReason ||
+                "",
+
+
+            /*
+            PAYMENT ATTEMPTS
+            */
+
+            paymentAttemptCount:
+                Number(
+                    withdrawal.paymentAttemptCount || 0
+                ),
+
+            lastPaymentAttemptId:
+                withdrawal.lastPaymentAttemptId ||
+                "",
+
+            lastPaymentAttemptStatus:
+                withdrawal.lastPaymentAttemptStatus ||
+                "",
+
+
+            /*
+            RESTORATION
+            */
+
+            commissionRestored:
+                withdrawal.commissionRestored === true,
+
+            pendingWithdrawalRestored:
+                withdrawal.pendingWithdrawalRestored === true,
+
+
+            /*
             TIMESTAMPS
-            ==================================================
             */
 
             requestedAt:
@@ -2281,42 +3256,6 @@ class WithdrawalManager {
             paidAt:
                 withdrawal.paidAt,
 
-
-            /*
-            ==================================================
-            ADMIN
-            ==================================================
-            */
-
-            approvedById:
-                withdrawal.approvedById ||
-                "",
-
-            approvedByName:
-                approvedByName,
-
-            rejectionReason:
-                withdrawal.rejectionReason ||
-                "",
-
-
-            /*
-            ==================================================
-            M-PESA
-            ==================================================
-            */
-
-            mpesaReceipt:
-                withdrawal.mpesaReceipt ||
-                "",
-
-
-            /*
-            ==================================================
-            PROCESSING
-            ==================================================
-            */
-
             paymentAttemptedAt:
                 withdrawal.paymentAttemptedAt ||
                 null,
@@ -2327,16 +3266,60 @@ class WithdrawalManager {
 
             paymentFailedAt:
                 withdrawal.paymentFailedAt ||
-                null
+                null,
+
+            processingAt:
+                withdrawal.processingAt ||
+                null,
+
+
+            /*
+            ADMIN
+            */
+
+            approvedById:
+                withdrawal.approvedById ||
+                "",
+
+            approvedByName,
+
+            rejectionReason:
+                withdrawal.rejectionReason ||
+                "",
+
+
+            /*
+            M-PESA
+            */
+
+            mpesaReceipt:
+                withdrawal.mpesaReceipt ||
+                "",
+
+            conversationId:
+                withdrawal.conversationId ||
+                "",
+
+            originatorConversationId:
+                withdrawal.originatorConversationId ||
+                ""
         };
     }
-
 
 
     /*
     ==================================================
     PREVENT DUPLICATE WITHDRAWAL
     ==================================================
+
+    ACTIVE STATES:
+
+        pending
+        approved
+        processing
+        reconciliation_required
+
+    payment_failed and rejected are NOT active.
     */
 
     async pendingWithdrawalExists(
@@ -2350,29 +3333,39 @@ class WithdrawalManager {
                 .equalTo(agentId)
                 .get();
 
-
         if (!snapshot.exists()) {
             return false;
         }
 
 
-        let exists = false;
+        let exists =
+            false;
 
 
         snapshot.forEach(
             child => {
 
                 const status =
-                    child.val().status;
+                    this.normalizeStatus(
+                        child.val().status
+                    );
 
 
                 if (
+
                     status === "pending" ||
+
                     status === "approved" ||
-                    status === "processing"
+
+                    status === "processing" ||
+
+                    status ===
+                        "reconciliation_required"
+
                 ) {
 
-                    exists = true;
+                    exists =
+                        true;
                 }
             }
         );
@@ -2380,7 +3373,6 @@ class WithdrawalManager {
 
         return exists;
     }
-
 
 
     /*
@@ -2402,8 +3394,8 @@ class WithdrawalManager {
                 current => {
 
                     return (
-                        current || 0
-                    ) + 1;
+                        Number(current || 0) + 1
+                    );
                 }
             );
 
@@ -2421,17 +3413,17 @@ class WithdrawalManager {
         const year =
             today.getFullYear();
 
-
         const month =
             String(
                 today.getMonth() + 1
-            ).padStart(2, "0");
-
+            )
+                .padStart(2, "0");
 
         const day =
             String(
                 today.getDate()
-            ).padStart(2, "0");
+            )
+                .padStart(2, "0");
 
 
         const number =
@@ -2439,11 +3431,12 @@ class WithdrawalManager {
                 .padStart(6, "0");
 
 
-        return `WD-${year}${month}${day}-${number}`;
+        return (
+            `WD-${year}${month}${day}-${number}`
+        );
     }
 }
 
 
 module.exports =
     new WithdrawalManager();
-

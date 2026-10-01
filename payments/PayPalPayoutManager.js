@@ -25,7 +25,6 @@ class PayPalPayoutManager {
         if (environment === "live") {
 
             return "https://api-m.paypal.com";
-
         }
 
 
@@ -64,41 +63,133 @@ class PayPalPayoutManager {
                 .toString("base64");
 
 
-        const response =
-            await axios.post(
+        try {
 
-                `${this.getBaseUrl()}/v1/oauth2/token`,
+            const response =
+                await axios.post(
 
-                "grant_type=client_credentials",
+                    `${this.getBaseUrl()}/v1/oauth2/token`,
 
-                {
-                    timeout: 30000,
+                    "grant_type=client_credentials",
 
-                    headers: {
+                    {
 
-                        Authorization:
-                            `Basic ${auth}`,
+                        timeout:
+                            30000,
 
-                        "Content-Type":
-                            "application/x-www-form-urlencoded"
+                        headers: {
 
+                            Authorization:
+                                `Basic ${auth}`,
+
+                            "Content-Type":
+                                "application/x-www-form-urlencoded",
+
+                            Accept:
+                                "application/json"
+                        }
                     }
-                }
-            );
+                );
 
 
-        if (
-            !response.data ||
-            !response.data.access_token
-        ) {
+            if (
+                !response.data ||
+                !response.data.access_token
+            ) {
 
-            throw new Error(
-                "PayPal did not return an access token."
-            );
+                throw new Error(
+                    "PayPal did not return an access token."
+                );
+            }
+
+
+            return response.data.access_token;
+
         }
 
+        catch (error) {
 
-        return response.data.access_token;
+            console.error(
+                "PAYPAL ACCESS TOKEN ERROR:",
+                error.response?.status ||
+                error.code ||
+                error.message
+            );
+
+
+            /*
+            ==========================================
+            TOKEN ERROR CLASSIFICATION
+            ==========================================
+
+            If credentials/configuration are clearly
+            invalid, this is a known local/provider
+            failure.
+
+            If the network timed out, the outcome of
+            the token request is irrelevant to the
+            payout itself because the payout request
+            was never submitted.
+            */
+
+            if (
+                error.code === "ECONNABORTED" ||
+                error.code === "ETIMEDOUT" ||
+                error.code === "ECONNRESET" ||
+                error.code === "ECONNREFUSED" ||
+                error.code === "EAI_AGAIN"
+            ) {
+
+                const tokenError =
+                    new Error(
+                        "Unable to connect to PayPal while requesting an access token."
+                    );
+
+
+                tokenError.code =
+                    error.code;
+
+                tokenError.unknownOutcome =
+                    false;
+
+                tokenError.reconciliationRequired =
+                    false;
+
+
+                throw tokenError;
+            }
+
+
+            const status =
+                Number(
+                    error.response?.status || 0
+                );
+
+
+            if (status >= 500) {
+
+                const tokenError =
+                    new Error(
+                        "PayPal authentication service is temporarily unavailable."
+                    );
+
+
+                tokenError.code =
+                    `PAYPAL_HTTP_${status}`;
+
+                tokenError.unknownOutcome =
+                    false;
+
+                tokenError.reconciliationRequired =
+                    false;
+
+
+                throw tokenError;
+            }
+
+
+            throw error;
+        }
     }
 
 
@@ -109,11 +200,12 @@ class PayPalPayoutManager {
 
     IMPORTANT:
 
-    This ID remains stable when retrying the same
-    logical withdrawal.
+    One logical ParentIQ withdrawal must always use
+    one stable sender_batch_id.
 
-    PayPal uses sender_batch_id to prevent duplicate
-    payouts.
+    Retrying the same withdrawal therefore reuses
+    the same PayPal idempotency key.
+
     ==================================================
     */
 
@@ -123,6 +215,307 @@ class PayPalPayoutManager {
             withdrawal.paypalSenderBatchId ||
             `PARENTIQ-${withdrawal.id}`
         );
+    }
+
+
+    /*
+    ==================================================
+    NORMALIZE PAYPAL ERROR
+    ==================================================
+    */
+
+    normalizePayPalError(error) {
+
+        const status =
+            Number(
+                error?.response?.status || 0
+            );
+
+
+        const responseData =
+            error?.response?.data ||
+            null;
+
+
+        const name =
+            String(
+                responseData?.name ||
+                ""
+            ).toUpperCase();
+
+
+        const message =
+            String(
+                responseData?.message ||
+                responseData?.error_description ||
+                error?.message ||
+                "PayPal payout request failed."
+            );
+
+
+        /*
+        ==========================================
+        NETWORK / TIMEOUT
+        ==========================================
+
+        These are UNKNOWN because PayPal may have
+        received the payout before our connection
+        failed.
+        */
+
+        const networkError =
+            (
+                error?.code === "ECONNABORTED" ||
+                error?.code === "ETIMEDOUT" ||
+                error?.code === "ECONNRESET" ||
+                error?.code === "ECONNREFUSED" ||
+                error?.code === "EAI_AGAIN" ||
+                error?.code === "ERR_NETWORK"
+            );
+
+
+        if (networkError) {
+
+            return {
+
+                message:
+                    "PayPal payout request outcome is uncertain because the connection failed.",
+
+                code:
+                    error.code ||
+                    "PAYPAL_NETWORK_ERROR",
+
+                httpStatus:
+                    status,
+
+                unknownOutcome:
+                    true,
+
+                reconciliationRequired:
+                    true,
+
+                confirmedFailure:
+                    false,
+
+                paypalResponse:
+                    responseData
+            };
+        }
+
+
+        /*
+        ==========================================
+        SERVER ERRORS
+        ==========================================
+
+        PayPal 5xx means we cannot safely know
+        whether the payout was accepted.
+        */
+
+        if (status >= 500) {
+
+            return {
+
+                message:
+                    "PayPal payout outcome is uncertain because PayPal returned a server error.",
+
+                code:
+                    `PAYPAL_HTTP_${status}`,
+
+                httpStatus:
+                    status,
+
+                unknownOutcome:
+                    true,
+
+                reconciliationRequired:
+                    true,
+
+                confirmedFailure:
+                    false,
+
+                paypalResponse:
+                    responseData
+            };
+        }
+
+
+        /*
+        ==========================================
+        RATE LIMIT
+        ==========================================
+
+        429 is not a payout rejection.
+
+        The request may have reached PayPal.
+        */
+
+        if (status === 429) {
+
+            return {
+
+                message:
+                    "PayPal rate limit reached. Payout outcome requires reconciliation.",
+
+                code:
+                    "PAYPAL_RATE_LIMIT",
+
+                httpStatus:
+                    status,
+
+                unknownOutcome:
+                    true,
+
+                reconciliationRequired:
+                    true,
+
+                confirmedFailure:
+                    false,
+
+                paypalResponse:
+                    responseData
+            };
+        }
+
+
+        /*
+        ==========================================
+        DUPLICATE / IDEMPOTENCY RESPONSE
+        ==========================================
+
+        A duplicate sender batch/request ID can mean
+        that PayPal already received the original payout.
+
+        NEVER refund immediately in this situation.
+        */
+
+        const duplicateError =
+            (
+                name.includes("DUPLICATE") ||
+                name.includes("RESOURCE_ALREADY_EXISTS") ||
+                name.includes("IDEMPOTENCY")
+            ) ||
+            message
+                .toLowerCase()
+                .includes("duplicate");
+
+
+        if (
+            duplicateError ||
+            status === 409
+        ) {
+
+            return {
+
+                message:
+                    "PayPal indicates that this payout request may already exist. Reconciliation is required.",
+
+                code:
+                    "PAYPAL_DUPLICATE_OR_EXISTING_PAYOUT",
+
+                httpStatus:
+                    status,
+
+                unknownOutcome:
+                    true,
+
+                reconciliationRequired:
+                    true,
+
+                confirmedFailure:
+                    false,
+
+                paypalResponse:
+                    responseData
+            };
+        }
+
+
+        /*
+        ==========================================
+        OTHER 4XX ERRORS
+        ==========================================
+
+        These are normally definitive request/provider
+        failures.
+
+        Examples:
+        - invalid receiver
+        - invalid amount
+        - invalid currency
+        - unauthorized request
+        - malformed payout
+
+        These can safely be treated as confirmed
+        failures because PayPal rejected the request.
+        */
+
+        if (
+            status >= 400 &&
+            status < 500
+        ) {
+
+            return {
+
+                message:
+                    message,
+
+                code:
+                    name ||
+                    `PAYPAL_HTTP_${status}`,
+
+                httpStatus:
+                    status,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                confirmedFailure:
+                    true,
+
+                paypalResponse:
+                    responseData
+            };
+        }
+
+
+        /*
+        ==========================================
+        UNKNOWN ERROR
+        ==========================================
+
+        Financially safest default:
+        if we cannot determine what happened, do
+        not refund automatically.
+        */
+
+        return {
+
+            message:
+                message,
+
+            code:
+                error?.code ||
+                "PAYPAL_UNKNOWN_ERROR",
+
+            httpStatus:
+                status,
+
+            unknownOutcome:
+                true,
+
+            reconciliationRequired:
+                true,
+
+            confirmedFailure:
+                false,
+
+            paypalResponse:
+                responseData
+        };
     }
 
 
@@ -161,16 +554,12 @@ class PayPalPayoutManager {
             withdrawal.agentId
         );
 
-        console.log(
-            "PayPal email:",
-            withdrawal.paypalEmail
-        );
-
 
         /*
-        ==========================================
-        VALIDATE RECIPIENT
-        ==========================================
+        IMPORTANT:
+
+        Do not log the complete PayPal email in
+        production logs.
         */
 
         const paypalEmail =
@@ -181,11 +570,46 @@ class PayPalPayoutManager {
                 .toLowerCase();
 
 
+        console.log(
+            "PayPal recipient configured:",
+            Boolean(paypalEmail)
+        );
+
+
+        /*
+        ==========================================
+        VALIDATE RECIPIENT
+        ==========================================
+        */
+
         if (!paypalEmail) {
 
-            throw new Error(
-                "PayPal email is required."
-            );
+            return {
+
+                success:
+                    false,
+
+                provider:
+                    "PAYPAL",
+
+                status:
+                    "FAILED",
+
+                confirmedFailure:
+                    true,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                code:
+                    "PAYPAL_EMAIL_REQUIRED",
+
+                message:
+                    "PayPal email is required."
+            };
         }
 
 
@@ -195,9 +619,32 @@ class PayPalPayoutManager {
 
         if (!emailRegex.test(paypalEmail)) {
 
-            throw new Error(
-                "Invalid PayPal email address."
-            );
+            return {
+
+                success:
+                    false,
+
+                provider:
+                    "PAYPAL",
+
+                status:
+                    "FAILED",
+
+                confirmedFailure:
+                    true,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                code:
+                    "PAYPAL_INVALID_EMAIL",
+
+                message:
+                    "Invalid PayPal email address."
+            };
         }
 
 
@@ -217,6 +664,37 @@ class PayPalPayoutManager {
                 .toUpperCase();
 
 
+        if (!currency) {
+
+            return {
+
+                success:
+                    false,
+
+                provider:
+                    "PAYPAL",
+
+                status:
+                    "FAILED",
+
+                confirmedFailure:
+                    true,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                code:
+                    "PAYPAL_CURRENCY_REQUIRED",
+
+                message:
+                    "PayPal payout currency is required."
+            };
+        }
+
+
         /*
         ==========================================
         PAYOUT AMOUNT
@@ -234,9 +712,32 @@ class PayPalPayoutManager {
             payoutAmount <= 0
         ) {
 
-            throw new Error(
-                "Invalid PayPal payout amount."
-            );
+            return {
+
+                success:
+                    false,
+
+                provider:
+                    "PAYPAL",
+
+                status:
+                    "FAILED",
+
+                confirmedFailure:
+                    true,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                code:
+                    "PAYPAL_INVALID_AMOUNT",
+
+                message:
+                    "Invalid PayPal payout amount."
+            };
         }
 
 
@@ -317,6 +818,18 @@ class PayPalPayoutManager {
             paypalTransactionId:
                 "",
 
+            paypalBatchStatus:
+                "",
+
+            paypalTransactionStatus:
+                "",
+
+            unknownOutcome:
+                false,
+
+            reconciliationRequired:
+                false,
+
             createdAt:
                 now,
 
@@ -351,6 +864,16 @@ class PayPalPayoutManager {
                 error:
                     error.message,
 
+                errorCode:
+                    error.code ||
+                    "",
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
                 paymentFailedAt:
                     Date.now(),
 
@@ -371,6 +894,19 @@ class PayPalPayoutManager {
 
                 status:
                     "FAILED",
+
+                confirmedFailure:
+                    true,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                code:
+                    error.code ||
+                    "PAYPAL_AUTH_ERROR",
 
                 message:
                     error.message
@@ -395,7 +931,7 @@ class PayPalPayoutManager {
                     "Your ParentIQ commission payout",
 
                 email_message:
-                    "Your ParentIQ commission payout has been sent."
+                    "Your ParentIQ commission payout has been submitted."
             },
 
             items: [
@@ -422,6 +958,7 @@ class PayPalPayoutManager {
                     sender_item_id:
                         withdrawal.id
                 }
+
             ]
         };
 
@@ -438,25 +975,21 @@ class PayPalPayoutManager {
                 "Sending PayPal payout..."
             );
 
-
             console.log(
                 "PayPal environment:",
                 process.env.PAYPAL_ENVIRONMENT ||
                 "sandbox"
             );
 
-
             console.log(
                 "PayPal currency:",
                 currency
             );
 
-
             console.log(
                 "PayPal payout amount:",
                 payoutAmount
             );
-
 
             console.log(
                 "PayPal sender batch ID:",
@@ -484,6 +1017,15 @@ class PayPalPayoutManager {
                             "Content-Type":
                                 "application/json",
 
+                            Accept:
+                                "application/json",
+
+                            /*
+                            PayPal idempotency key.
+
+                            Same withdrawal = same key.
+                            */
+
                             "PayPal-Request-Id":
                                 senderBatchId
                         }
@@ -500,12 +1042,17 @@ class PayPalPayoutManager {
 
 
             const paypalBatchId =
-                batchHeader.payout_batch_id || "";
+                batchHeader.payout_batch_id ||
+                "";
 
 
             const batchStatus =
-                batchHeader.batch_status ||
-                "PENDING";
+                String(
+                    batchHeader.batch_status ||
+                    "PENDING"
+                )
+                    .trim()
+                    .toUpperCase();
 
 
             /*
@@ -518,15 +1065,40 @@ class PayPalPayoutManager {
                 "";
 
 
+            let transactionId =
+                "";
+
+
+            let transactionStatus =
+                "";
+
+
             if (
                 Array.isArray(data.items) &&
                 data.items.length > 0
             ) {
 
+                const item =
+                    data.items[0];
+
+
                 paypalItemId =
-                    data.items[0]
-                        ?.payout_item_id ||
+                    item?.payout_item_id ||
                     "";
+
+
+                transactionId =
+                    item?.transaction_id ||
+                    "";
+
+
+                transactionStatus =
+                    String(
+                        item?.transaction_status ||
+                        ""
+                    )
+                        .trim()
+                        .toUpperCase();
             }
 
 
@@ -548,8 +1120,20 @@ class PayPalPayoutManager {
 
                 paypalItemId,
 
+                paypalTransactionId:
+                    transactionId,
+
                 paypalBatchStatus:
                     batchStatus,
+
+                paypalTransactionStatus:
+                    transactionStatus,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
 
                 paypalResponse:
                     data,
@@ -588,8 +1172,20 @@ class PayPalPayoutManager {
 
                 paypalItemId,
 
+                paypalTransactionId:
+                    transactionId,
+
                 paypalBatchStatus:
                     batchStatus,
+
+                paypalTransactionStatus:
+                    transactionStatus,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
 
                 message:
                     "PayPal payout accepted."
@@ -600,48 +1196,144 @@ class PayPalPayoutManager {
         catch (error) {
 
             console.error(
-                "PayPal payout failed."
+                "PAYPAL PAYOUT REQUEST ERROR"
             );
 
 
-            let message =
-                error.message;
-
-
-            let paypalResponse =
-                null;
-
-
-            if (error.response) {
-
-                paypalResponse =
-                    error.response.data;
-
-
-                console.error(
-                    "PayPal HTTP:",
-                    error.response.status
+            const normalized =
+                this.normalizePayPalError(
+                    error
                 );
 
+
+            console.error(
+                "PayPal HTTP status:",
+                normalized.httpStatus ||
+                "N/A"
+            );
+
+
+            console.error(
+                "PayPal error code:",
+                normalized.code
+            );
+
+
+            console.error(
+                "PayPal error message:",
+                normalized.message
+            );
+
+
+            /*
+            IMPORTANT:
+
+            Do not blindly dump credentials or
+            sensitive recipient information.
+            */
+
+            if (
+                normalized.paypalResponse
+            ) {
 
                 console.error(
                     "PayPal response:",
                     JSON.stringify(
-                        paypalResponse,
+                        normalized.paypalResponse,
                         null,
                         2
                     )
                 );
-
-
-                message =
-                    paypalResponse?.message ||
-                    paypalResponse?.name ||
-                    JSON.stringify(
-                        paypalResponse
-                    );
             }
 
+
+            /*
+            ======================================
+            UNKNOWN OUTCOME
+            ======================================
+
+            We explicitly record this in the payment
+            record so reconciliation can identify it.
+            */
+
+            if (
+                normalized.unknownOutcome
+            ) {
+
+                await paymentRef.update({
+
+                    status:
+                        "RECONCILIATION_REQUIRED",
+
+                    error:
+                        normalized.message,
+
+                    errorCode:
+                        normalized.code,
+
+                    httpStatus:
+                        normalized.httpStatus ||
+                        0,
+
+                    paypalResponse:
+                        normalized.paypalResponse,
+
+                    unknownOutcome:
+                        true,
+
+                    reconciliationRequired:
+                        true,
+
+                    reconciliationRequiredAt:
+                        Date.now(),
+
+                    paymentFailedAt:
+                        null,
+
+                    updatedAt:
+                        Date.now()
+                });
+
+
+                return {
+
+                    success:
+                        false,
+
+                    paymentId,
+
+                    provider:
+                        "PAYPAL",
+
+                    status:
+                        "RECONCILIATION_REQUIRED",
+
+                    code:
+                        normalized.code,
+
+                    message:
+                        normalized.message,
+
+                    httpStatus:
+                        normalized.httpStatus,
+
+                    unknownOutcome:
+                        true,
+
+                    reconciliationRequired:
+                        true,
+
+                    confirmedFailure:
+                        false
+                };
+            }
+
+
+            /*
+            ======================================
+            CONFIRMED FAILURE
+            ======================================
+            */
 
             await paymentRef.update({
 
@@ -649,9 +1341,26 @@ class PayPalPayoutManager {
                     "FAILED",
 
                 error:
-                    message,
+                    normalized.message,
 
-                paypalResponse,
+                errorCode:
+                    normalized.code,
+
+                httpStatus:
+                    normalized.httpStatus ||
+                    0,
+
+                paypalResponse:
+                    normalized.paypalResponse,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                confirmedFailure:
+                    true,
 
                 paymentFailedAt:
                     Date.now(),
@@ -674,7 +1383,23 @@ class PayPalPayoutManager {
                 status:
                     "FAILED",
 
-                message
+                code:
+                    normalized.code,
+
+                message:
+                    normalized.message,
+
+                httpStatus:
+                    normalized.httpStatus,
+
+                unknownOutcome:
+                    false,
+
+                reconciliationRequired:
+                    false,
+
+                confirmedFailure:
+                    true
             };
         }
     }
@@ -685,18 +1410,18 @@ class PayPalPayoutManager {
     GET PAYPAL PAYOUT STATUS
     ==================================================
 
-    This retrieves the complete PayPal payout batch.
+    Retrieves the complete PayPal payout batch.
 
-    We intentionally return the raw PayPal response
-    as well as normalized fields so that:
+    This method does NOT modify the withdrawal.
 
-        DENIED
-        FAILED
-        SUCCESS
-        COMPLETED
-        PROCESSING
+    The withdrawal route is responsible for
+    translating the normalized provider status into:
 
-    can be diagnosed correctly.
+        paid
+        payment_failed
+        processing
+        reconciliation_required
+
     ==================================================
     */
 
@@ -710,6 +1435,13 @@ class PayPalPayoutManager {
                 "PayPal payout batch ID is required."
             );
         }
+
+
+        const normalizedBatchId =
+            String(
+                paypalBatchId
+            )
+                .trim();
 
 
         console.log(
@@ -726,7 +1458,7 @@ class PayPalPayoutManager {
 
         console.log(
             "Batch ID:",
-            paypalBatchId
+            normalizedBatchId
         );
 
 
@@ -751,7 +1483,7 @@ class PayPalPayoutManager {
             const response =
                 await axios.get(
 
-                    `${this.getBaseUrl()}/v1/payments/payouts/${encodeURIComponent(paypalBatchId)}`,
+                    `${this.getBaseUrl()}/v1/payments/payouts/${encodeURIComponent(normalizedBatchId)}`,
 
                     {
 
@@ -764,6 +1496,9 @@ class PayPalPayoutManager {
                                 `Bearer ${accessToken}`,
 
                             "Content-Type":
+                                "application/json",
+
+                            Accept:
                                 "application/json"
                         }
                     }
@@ -819,6 +1554,11 @@ class PayPalPayoutManager {
                 "";
 
 
+            const payoutBatchId =
+                batchHeader.payout_batch_id ||
+                normalizedBatchId;
+
+
             /*
             ==========================================
             PAYPAL ITEMS
@@ -851,25 +1591,68 @@ class PayPalPayoutManager {
                 null;
 
 
+            /*
+            ==========================================
+            FIND THE CORRECT ITEM
+            ==========================================
+
+            Prefer the ParentIQ sender item ID when
+            available.
+
+            This is safer than blindly assuming the
+            first item belongs to this withdrawal.
+            */
+
+            let item =
+                null;
+
+
             if (items.length > 0) {
 
-                const item =
-                    items[0];
+                item =
+                    items.find(
+                        candidate =>
+                            String(
+                                candidate?.payout_item
+                                    ?.sender_item_id ||
+                                candidate?.sender_item_id ||
+                                ""
+                            ) !== "" &&
+                            String(
+                                candidate?.payout_item
+                                    ?.sender_item_id ||
+                                candidate?.sender_item_id ||
+                                ""
+                            ) ===
+                            String(
+                                withdrawalIdForStatusLookup(
+                                    normalizedBatchId
+                                ) || ""
+                            )
+                    ) || items[0];
+            }
 
+
+            if (item) {
 
                 paypalItemId =
                     item.payout_item_id ||
+                    item.paypalItemId ||
+                    item.payoutItemId ||
                     "";
 
 
                 transactionId =
                     item.transaction_id ||
+                    item.transactionId ||
                     "";
 
 
                 transactionStatus =
                     String(
-                        item.transaction_status || ""
+                        item.transaction_status ||
+                        item.transactionStatus ||
+                        ""
                     )
                         .trim()
                         .toUpperCase();
@@ -900,6 +1683,34 @@ class PayPalPayoutManager {
 
             /*
             ==========================================
+            NORMALIZED STATUS FLAGS
+            ==========================================
+            */
+
+            const success =
+                (
+                    batchStatus === "SUCCESS" ||
+                    batchStatus === "COMPLETED" ||
+                    transactionStatus === "SUCCESS" ||
+                    transactionStatus === "COMPLETED"
+                );
+
+
+            const failed =
+                (
+                    batchStatus === "FAILED" ||
+                    batchStatus === "DENIED" ||
+                    batchStatus === "CANCELED" ||
+                    batchStatus === "CANCELLED" ||
+                    transactionStatus === "FAILED" ||
+                    transactionStatus === "BLOCKED" ||
+                    transactionStatus === "RETURNED" ||
+                    transactionStatus === "REFUNDED"
+                );
+
+
+            /*
+            ==========================================
             RETURN NORMALIZED + RAW DATA
             ==========================================
             */
@@ -910,8 +1721,7 @@ class PayPalPayoutManager {
                     true,
 
                 paypalBatchId:
-                    batchHeader.payout_batch_id ||
-                    paypalBatchId,
+                    payoutBatchId,
 
                 batchStatus,
 
@@ -931,6 +1741,16 @@ class PayPalPayoutManager {
 
                 items,
 
+                paypalSuccess:
+                    success,
+
+                paypalFailure:
+                    failed,
+
+                paypalProcessing:
+                    !success &&
+                    !failed,
+
                 /*
                 Complete original PayPal response.
                 */
@@ -943,32 +1763,103 @@ class PayPalPayoutManager {
         catch (error) {
 
             console.error(
-                "PayPal payout status request failed."
+                "PAYPAL PAYOUT STATUS REQUEST FAILED."
             );
 
 
-            if (error.response) {
-
-                console.error(
-                    "PayPal status HTTP:",
-                    error.response.status
+            const normalized =
+                this.normalizePayPalError(
+                    error
                 );
 
 
-                console.error(
-                    "PayPal status response:",
-                    JSON.stringify(
-                        error.response.data,
-                        null,
-                        2
-                    )
+            console.error(
+                "PayPal status HTTP:",
+                normalized.httpStatus ||
+                "N/A"
+            );
+
+
+            console.error(
+                "PayPal status code:",
+                normalized.code
+            );
+
+
+            console.error(
+                "PayPal status message:",
+                normalized.message
+            );
+
+
+            /*
+            ==========================================
+            STATUS QUERY UNKNOWN OUTCOME
+            ==========================================
+
+            Throw an enriched error.
+
+            The withdrawal route can then place the
+            withdrawal into reconciliation_required.
+            */
+
+            const statusError =
+                new Error(
+                    normalized.message
                 );
-            }
 
 
-            throw error;
+            statusError.code =
+                normalized.code;
+
+
+            statusError.httpStatus =
+                normalized.httpStatus;
+
+
+            statusError.unknownOutcome =
+                normalized.unknownOutcome;
+
+
+            statusError.reconciliationRequired =
+                normalized.reconciliationRequired;
+
+
+            statusError.confirmedFailure =
+                normalized.confirmedFailure;
+
+
+            statusError.paypalResponse =
+                normalized.paypalResponse;
+
+
+            throw statusError;
         }
     }
+}
+
+
+/*
+====================================================
+STATUS LOOKUP HELPER
+====================================================
+
+The PayPal status endpoint normally returns all
+items belonging to the batch.
+
+We intentionally do not depend on this helper
+for the primary lookup because the withdrawal
+route already maps the batch ID to the withdrawal.
+
+This function returns null and exists only to keep
+the item-selection code safe if no local mapping is
+available here.
+====================================================
+*/
+
+function withdrawalIdForStatusLookup() {
+
+    return null;
 }
 
 
@@ -980,4 +1871,3 @@ EXPORT SINGLE MANAGER INSTANCE
 
 module.exports =
     new PayPalPayoutManager();
-    
