@@ -21,7 +21,7 @@ HELPERS
 */
 
 /*
-    Normalize a provider status.
+    Normalize provider status.
 */
 function normalizeStatus(value) {
     return String(value || "")
@@ -30,32 +30,40 @@ function normalizeStatus(value) {
 }
 
 /*
-    PayPal statuses representing confirmed success.
+====================================================
+PAYPAL SUCCESS
+====================================================
+
+IMPORTANT:
+
+A PayPal batch SUCCESS does NOT prove that this
+specific withdrawal was paid.
+
+The specific payout item must report:
+
+    transaction_status === SUCCESS
+
+Do NOT treat COMPLETED batch status as sufficient.
 */
 function isPayPalSuccess(
     batchStatus,
     transactionStatus
 ) {
-    const batch =
-        normalizeStatus(batchStatus);
-
-    const transaction =
-        normalizeStatus(transactionStatus);
-
     return (
-        batch === "SUCCESS" ||
-        batch === "COMPLETED" ||
-        transaction === "SUCCESS" ||
-        transaction === "COMPLETED"
+        normalizeStatus(transactionStatus) ===
+        "SUCCESS"
     );
 }
 
 /*
-    PayPal statuses representing confirmed failure.
+====================================================
+PAYPAL FAILURE
+====================================================
 
-    IMPORTANT:
-    TIMEOUT / NETWORK / UNKNOWN are deliberately
-    NOT included here.
+These represent confirmed provider failure.
+
+UNKNOWN / TIMEOUT / NETWORK / RECONCILIATION
+are deliberately NOT included.
 */
 function isPayPalFailure(
     batchStatus,
@@ -81,8 +89,9 @@ function isPayPalFailure(
 }
 
 /*
-    Determine whether a PayPal result represents an
-    unknown provider outcome.
+====================================================
+PAYPAL UNKNOWN OUTCOME
+====================================================
 */
 function isUnknownPayPalOutcome(payment) {
     if (!payment) {
@@ -124,6 +133,7 @@ function isUnknownPayPalOutcome(payment) {
         code === "ETIMEDOUT" ||
         code === "ECONNRESET" ||
         code === "ECONNABORTED" ||
+        code === "ERR_NETWORK" ||
         code === "NETWORK_ERROR"
     ) {
         return true;
@@ -149,20 +159,14 @@ function isUnknownPayPalOutcome(payment) {
 }
 
 /*
-    Determine whether an error should be treated as an
-    unknown provider outcome.
+====================================================
+UNKNOWN PROVIDER ERROR
+====================================================
 
-    This is especially important for:
+Used primarily for provider submission errors.
 
-    - timeout
-    - ECONNRESET
-    - socket hang up
-    - 429
-    - 5xx
-    - connection failures
-
-    We must NEVER refund the wallet merely because our
-    server failed to receive PayPal's response.
+An unknown outcome must NEVER automatically restore
+the wallet.
 */
 function isUnknownProviderError(error) {
     if (!error) {
@@ -179,15 +183,15 @@ function isUnknownProviderError(error) {
 
     const code =
         String(
-            error.code ||
-            ""
+            error.code || ""
         ).toUpperCase();
 
     if (
         code === "ETIMEDOUT" ||
         code === "ECONNRESET" ||
         code === "ECONNABORTED" ||
-        code === "ERR_NETWORK"
+        code === "ERR_NETWORK" ||
+        code === "NETWORK_ERROR"
     ) {
         return true;
     }
@@ -200,12 +204,12 @@ function isUnknownProviderError(error) {
             error.response.status;
 
         /*
-            These responses can mean PayPal did not give
-            us a definitive outcome.
+            409 is especially important because the
+            original provider request may already have
+            been accepted.
 
-            409 is particularly important because the
-            request may already have been accepted and the
-            request ID reused.
+            429 / 5xx are also unresolved from the
+            application's perspective.
         */
         if (
             status === 409 ||
@@ -217,7 +221,7 @@ function isUnknownProviderError(error) {
     }
 
     /*
-        Axios network errors commonly have no response.
+        Axios network failures commonly have no response.
     */
     if (!error.response) {
         return true;
@@ -225,8 +229,7 @@ function isUnknownProviderError(error) {
 
     const message =
         String(
-            error.message ||
-            ""
+            error.message || ""
         ).toLowerCase();
 
     return (
@@ -234,13 +237,16 @@ function isUnknownProviderError(error) {
         message.includes("timed out") ||
         message.includes("socket hang up") ||
         message.includes("connection reset") ||
-        message.includes("network error")
+        message.includes("network error") ||
+        message.includes("econnreset") ||
+        message.includes("etimedout")
     );
 }
 
 /*
-    Safely extract an error message without exposing
-    secrets or an entire provider response.
+====================================================
+SAFE ERROR MESSAGE
+====================================================
 */
 function getSafeErrorMessage(error) {
     if (!error) {
@@ -248,7 +254,9 @@ function getSafeErrorMessage(error) {
     }
 
     if (error.safeMessage) {
-        return String(error.safeMessage);
+        return String(
+            error.safeMessage
+        ).slice(0, 500);
     }
 
     if (
@@ -282,16 +290,13 @@ function getSafeErrorMessage(error) {
 ====================================================
 PAYPAL RECONCILIATION
 ====================================================
-*/
 
-/*
-    Move a PayPal withdrawal into reconciliation_required.
+CRITICAL:
 
-    IMPORTANT:
-    This function NEVER restores the wallet.
+This function NEVER restores the wallet.
 
-    Funds remain reserved until the provider outcome is
-    definitively established.
+Funds remain reserved until PayPal's actual outcome
+is definitively established.
 */
 async function markPayPalReconciliationRequired(
     withdrawalId,
@@ -315,7 +320,7 @@ async function markPayPalReconciliationRequired(
         snapshot.val();
 
     /*
-        Never move a paid withdrawal backwards.
+        Never move paid backwards.
     */
     if (
         withdrawal.status === "paid"
@@ -341,12 +346,7 @@ async function markPayPalReconciliationRequired(
     }
 
     /*
-        A previously confirmed failed withdrawal is
-        allowed to remain failed.
-
-        We do not turn an already-restored withdrawal
-        into a reconciliation record unless it is
-        currently processing.
+        Do not overwrite an already confirmed failure.
     */
     if (
         withdrawal.status === "payment_failed" &&
@@ -400,7 +400,6 @@ async function markPayPalReconciliationRequired(
 REQUEST WITHDRAWAL
 ====================================================
 */
-
 router.post(
     "/request",
     async (req, res) => {
@@ -469,7 +468,6 @@ router.post(
 GET AGENT WITHDRAWAL HISTORY
 ====================================================
 */
-
 router.get(
     "/agent/:agentId",
     async (req, res) => {
@@ -506,7 +504,6 @@ router.get(
 GET ALL WITHDRAWALS
 ====================================================
 */
-
 router.get(
     "/",
     async (req, res) => {
@@ -522,7 +519,6 @@ router.get(
                 list.push({
                     id:
                         child.key,
-
                     ...child.val()
                 });
             });
@@ -563,7 +559,6 @@ router.get(
 GET WITHDRAWAL DETAILS
 ====================================================
 */
-
 router.get(
     "/details/:withdrawalId",
     async (req, res) => {
@@ -599,7 +594,6 @@ router.get(
 APPROVE WITHDRAWAL
 ====================================================
 */
-
 router.post(
     "/approve",
     async (req, res) => {
@@ -633,7 +627,6 @@ router.post(
 REJECT WITHDRAWAL
 ====================================================
 */
-
 router.post(
     "/reject",
     async (req, res) => {
@@ -671,34 +664,14 @@ GET:
 
 /withdrawals/paypal/status/:paypalBatchId
 
-Flow:
-
-PayPal SUCCESS
-        ↓
-PAID
-
-PayPal CONFIRMED FAILURE
-        ↓
-PAYMENT_FAILED
-        ↓
-wallet restored
-
-PayPal PROCESSING
-        ↓
-PROCESSING
-
-PayPal UNKNOWN
-        ↓
-RECONCILIATION_REQUIRED
-        ↓
-funds remain reserved
-
 IMPORTANT:
 
-An already-paid withdrawal is NEVER moved backwards.
-====================================================
-*/
+The status endpoint first finds the local withdrawal
+and obtains its expected PayPal payout item ID.
 
+We NEVER assume items[0] belongs to this withdrawal
+when an expected item ID exists.
+*/
 router.get(
     "/paypal/status/:paypalBatchId",
     async (req, res) => {
@@ -716,99 +689,9 @@ router.get(
         }
 
         try {
-            console.log(
-                "[PAYPAL STATUS] Checking:",
-                paypalBatchId
-            );
-
             /*
             ==========================================
-            QUERY PAYPAL
-            ==========================================
-            */
-
-            const paypalStatus =
-                await PayPalPayoutManager
-                    .getPayoutStatus(
-                        paypalBatchId
-                    );
-
-            /*
-            ==========================================
-            NORMALIZE RESPONSE
-            ==========================================
-            */
-
-            const batchStatus =
-                normalizeStatus(
-                    paypalStatus.batchStatus
-                );
-
-            const items =
-                Array.isArray(
-                    paypalStatus.items
-                )
-                    ? paypalStatus.items
-                    : [];
-
-            const firstItem =
-                items.length > 0
-                    ? items[0]
-                    : null;
-
-            const transactionStatus =
-                firstItem
-                    ? normalizeStatus(
-                        firstItem.transaction_status ||
-                        firstItem.transactionStatus
-                    )
-                    : "";
-
-            const transactionId =
-                firstItem
-                    ? (
-                        firstItem.transaction_id ||
-                        firstItem.transactionId ||
-                        ""
-                    )
-                    : "";
-
-            const paypalItemId =
-                firstItem
-                    ? (
-                        firstItem.payout_item_id ||
-                        firstItem.paypalItemId ||
-                        firstItem.payoutItemId ||
-                        ""
-                    )
-                    : "";
-
-            const paypalSuccess =
-                isPayPalSuccess(
-                    batchStatus,
-                    transactionStatus
-                );
-
-            const paypalFailure =
-                isPayPalFailure(
-                    batchStatus,
-                    transactionStatus
-                );
-
-            console.log(
-                "[PAYPAL STATUS RESULT]",
-                {
-                    paypalBatchId,
-                    batchStatus,
-                    transactionStatus,
-                    transactionId,
-                    paypalItemId
-                }
-            );
-
-            /*
-            ==========================================
-            FIND LOCAL WITHDRAWAL
+            FIND LOCAL WITHDRAWAL FIRST
             ==========================================
             */
 
@@ -840,12 +723,6 @@ router.get(
                 }
             );
 
-            /*
-            ==========================================
-            NO LOCAL WITHDRAWAL
-            ==========================================
-            */
-
             if (!withdrawalId) {
                 return res.status(404).json({
                     success: false,
@@ -854,14 +731,184 @@ router.get(
                         "PayPal payout was found, but no matching local withdrawal was found.",
 
                     data: {
-                        paypalBatchId,
-                        batchStatus,
-                        transactionStatus,
-                        transactionId,
-                        paypalItemId
+                        paypalBatchId
                     }
                 });
             }
+
+            /*
+            ==========================================
+            EXPECTED PAYPAL ITEM
+            ==========================================
+            */
+
+            const expectedSenderItemId =
+                String(
+                    withdrawal.paypalItemId ||
+                    ""
+                ).trim();
+
+            console.log(
+                "[PAYPAL STATUS] Checking:",
+                {
+                    paypalBatchId,
+                    withdrawalId,
+                    expectedSenderItemId
+                }
+            );
+
+            /*
+            ==========================================
+            QUERY PAYPAL
+
+            The manager is responsible for refusing
+            to guess an item when identification is
+            ambiguous.
+            ==========================================
+            */
+
+            const paypalStatus =
+                await PayPalPayoutManager
+                    .getPayoutStatus(
+                        paypalBatchId,
+                        expectedSenderItemId
+                    );
+
+            const batchStatus =
+                normalizeStatus(
+                    paypalStatus.batchStatus
+                );
+
+            const items =
+                Array.isArray(
+                    paypalStatus.items
+                )
+                    ? paypalStatus.items
+                    : [];
+
+            /*
+            ==========================================
+            SELECT CORRECT PAYPAL ITEM
+            ==========================================
+            */
+
+            let payoutItem = null;
+
+            if (expectedSenderItemId) {
+                payoutItem =
+                    items.find(item => {
+                        const itemId =
+                            String(
+                                item?.payout_item_id ||
+                                item?.paypalItemId ||
+                                item?.payoutItemId ||
+                                ""
+                            ).trim();
+
+                        return (
+                            itemId ===
+                            expectedSenderItemId
+                        );
+                    }) || null;
+            }
+            else if (items.length === 1) {
+                payoutItem =
+                    items[0];
+            }
+
+            /*
+            ==========================================
+            ITEM IDENTIFICATION SAFETY
+            ==========================================
+            */
+
+            const itemIdentificationRequired =
+                Boolean(
+                    expectedSenderItemId &&
+                    !payoutItem
+                ) ||
+                Boolean(
+                    !expectedSenderItemId &&
+                    items.length > 1 &&
+                    !payoutItem
+                );
+
+            const transactionStatus =
+                payoutItem
+                    ? normalizeStatus(
+                        payoutItem.transaction_status ||
+                        payoutItem.transactionStatus ||
+                        payoutItem.payout_item?.transaction_status
+                    )
+                    : "";
+
+            const transactionId =
+                payoutItem
+                    ? (
+                        payoutItem.transaction_id ||
+                        payoutItem.transactionId ||
+                        payoutItem.payout_item?.transaction_id ||
+                        ""
+                    )
+                    : "";
+
+            const paypalItemId =
+                payoutItem
+                    ? (
+                        payoutItem.payout_item_id ||
+                        payoutItem.paypalItemId ||
+                        payoutItem.payoutItemId ||
+                        payoutItem.payout_item?.payout_item_id ||
+                        ""
+                    )
+                    : "";
+
+            /*
+            ==========================================
+            SAFETY EVALUATION
+            ==========================================
+            */
+
+            const paypalSuccess =
+                !itemIdentificationRequired &&
+                isPayPalSuccess(
+                    batchStatus,
+                    transactionStatus
+                );
+
+            const paypalFailure =
+                !itemIdentificationRequired &&
+                isPayPalFailure(
+                    batchStatus,
+                    transactionStatus
+                );
+
+            const reconciliationRequired =
+                itemIdentificationRequired ||
+                (
+                    normalizeStatus(
+                        paypalStatus.status
+                    ) ===
+                    "RECONCILIATION_REQUIRED"
+                ) ||
+                paypalStatus.reconciliationRequired === true ||
+                paypalStatus.unknownOutcome === true;
+
+            console.log(
+                "[PAYPAL STATUS RESULT]",
+                {
+                    paypalBatchId,
+                    withdrawalId,
+                    batchStatus,
+                    transactionStatus,
+                    transactionId,
+                    paypalItemId,
+                    itemIdentificationRequired,
+                    paypalSuccess,
+                    paypalFailure,
+                    reconciliationRequired
+                }
+            );
 
             const withdrawalRef =
                 db
@@ -924,19 +971,63 @@ router.get(
 
             /*
             ==========================================
-            PAYPAL SUCCESS
+            ITEM CANNOT BE IDENTIFIED
+            ==========================================
+            */
+
+            if (reconciliationRequired) {
+                console.warn(
+                    "[PAYPAL] ITEM IDENTIFICATION / RECONCILIATION REQUIRED:",
+                    withdrawalId
+                );
+
+                await markPayPalReconciliationRequired(
+                    withdrawalId,
+                    itemIdentificationRequired
+                        ? "PayPal payout item could not be safely matched to this withdrawal. Manual reconciliation required."
+                        : (
+                            paypalStatus.message ||
+                            "PayPal payout outcome is unresolved. Manual reconciliation required."
+                        )
+                );
+
+                return res.status(202).json({
+                    success: false,
+
+                    reconciliationRequired:
+                        true,
+
+                    message:
+                        "PayPal payout outcome could not be safely confirmed. The withdrawal remains reserved for reconciliation.",
+
+                    withdrawalId,
+
+                    data: {
+                        paypalBatchId,
+                        batchStatus,
+                        paypalItemId,
+                        transactionStatus,
+                        transactionId,
+                        itemIdentificationRequired
+                    }
+                });
+            }
+
+            /*
+            ==========================================
+            PAYPAL CONFIRMED SUCCESS
             ==========================================
             */
 
             if (paypalSuccess) {
                 console.log(
-                    "[PAYPAL] CONFIRMED SUCCESS:",
+                    "[PAYPAL] CONFIRMED ITEM SUCCESS:",
                     withdrawalId
                 );
 
                 /*
-                    If already paid, ONLY synchronize the
-                    provider fields.
+                    Already paid:
+                    synchronize only.
 
                     DO NOT execute ledger/accounting again.
                 */
@@ -986,7 +1077,7 @@ router.get(
                         success: true,
 
                         message:
-                            "PayPal payout confirmed successful. Existing paid withdrawal synchronized.",
+                            "PayPal payout item confirmed successful. Existing paid withdrawal synchronized.",
 
                         withdrawalId,
 
@@ -1013,12 +1104,10 @@ router.get(
                 }
 
                 /*
-                    If already restored/failed, do not silently
-                    execute accounting again.
+                    If the local wallet was already restored,
+                    PayPal SUCCESS conflicts with local state.
 
-                    This situation requires investigation because
-                    the provider says SUCCESS while local state
-                    says payment_failed.
+                    Do NOT charge/restore again automatically.
                 */
                 if (
                     current.status === "payment_failed"
@@ -1043,7 +1132,10 @@ router.get(
 
                 /*
                     Normal path:
-                    processing → paid
+
+                    processing
+                    ↓
+                    paid
                 */
                 await withdrawalManager
                     .markAsPaid(
@@ -1053,9 +1145,6 @@ router.get(
                         paypalBatchId
                     );
 
-                /*
-                    Ensure stale provider failure state is gone.
-                */
                 await withdrawalRef.update({
                     paymentStatus:
                         "SUCCESS",
@@ -1071,6 +1160,20 @@ router.get(
 
                     paypalTransactionStatus:
                         transactionStatus,
+
+                    paypalTransactionId:
+                        transactionId,
+
+                    paypalItemId:
+                        paypalItemId,
+
+                    paypalBatchId:
+                        paypalStatus.paypalBatchId ||
+                        paypalBatchId,
+
+                    paymentReference:
+                        transactionId ||
+                        paypalBatchId,
 
                     updatedAt:
                         Date.now()
@@ -1090,7 +1193,7 @@ router.get(
                 );
 
                 /*
-                    Never move a paid withdrawal backwards.
+                    Never move paid backwards.
                 */
                 if (
                     current.status === "paid"
@@ -1120,8 +1223,9 @@ router.get(
                 }
 
                 /*
-                    A confirmed provider failure is safe to
-                    restore.
+                    Confirmed provider failure.
+
+                    Wallet restoration is now safe.
                 */
                 await withdrawalManager
                     .markPaymentFailed(
@@ -1157,13 +1261,14 @@ router.get(
                     /*
                         Never move paid backwards.
 
-                        Never move payment_failed into processing
-                        just because an unrelated status lookup
-                        returned an intermediate state.
+                        Never move payment_failed into
+                        processing merely because a status
+                        lookup is intermediate.
                     */
                     if (
                         latest.status !== "paid" &&
-                        latest.status !== "payment_failed"
+                        latest.status !== "payment_failed" &&
+                        latest.status !== "reconciliation_required"
                     ) {
                         await withdrawalRef.update({
                             status:
@@ -1224,11 +1329,14 @@ router.get(
             );
 
             /*
-                A status lookup failure does NOT itself prove
-                that the payout failed.
+                IMPORTANT:
 
-                Therefore we do not restore the wallet here.
+                A failed status lookup does NOT prove
+                that the PayPal payout failed.
+
+                Therefore the wallet is NOT restored.
             */
+
             return res.status(
                 isUnknownProviderError(e)
                     ? 202
@@ -1269,22 +1377,22 @@ PayPal submission
 PROCESSING
         ↓
 status reconciliation
-        ↓
-SUCCESS → PAID
-FAILURE → PAYMENT_FAILED
-UNKNOWN → RECONCILIATION_REQUIRED
 
-M-PESA:
+SUCCESS
+        ↓
+paid
 
-approved/payment_failed
+CONFIRMED FAILURE
         ↓
-atomic claim
+payment_failed
         ↓
-processing
+wallet restored
+
+UNKNOWN
         ↓
-M-Pesa submission
+reconciliation_required
         ↓
-PROCESSING
+funds remain reserved
 ====================================================
 */
 
@@ -1377,7 +1485,6 @@ router.post(
                 return res.status(400).json({
                     success: false,
                     message,
-
                     status:
                         withdrawal.status
                 });
@@ -1393,20 +1500,17 @@ router.post(
                 paymentMethod === "PAYPAL"
             ) {
                 console.log(
-                    "[PAYPAL] Starting payout:",
+                    "[PAYPAL] PAYMENT REQUEST RECEIVED:",
                     withdrawalId
                 );
 
                 /*
                 ======================================
                 ATOMIC CLAIM
+
+                Only ONE request can transition the
+                withdrawal into processing.
                 ======================================
-
-                This is critical.
-
-                Two administrators cannot simultaneously
-                turn the same approved withdrawal into
-                two PayPal submissions.
                 */
 
                 const claimResult =
@@ -1466,6 +1570,16 @@ router.post(
                             ? latestSnapshot.val()
                             : null;
 
+                    console.warn(
+                        "[PAYPAL] PAYMENT REQUEST REJECTED:",
+                        {
+                            withdrawalId,
+                            currentStatus:
+                                latest?.status ||
+                                "NOT_FOUND"
+                        }
+                    );
+
                     return res.status(409).json({
                         success: false,
 
@@ -1480,6 +1594,11 @@ router.post(
                             latest?.status || ""
                     });
                 }
+
+                console.log(
+                    "[PAYPAL] PAYMENT CLAIMED:",
+                    withdrawalId
+                );
 
                 /*
                 ======================================
@@ -1507,6 +1626,11 @@ router.post(
                 ======================================
                 */
 
+                console.log(
+                    "[PAYPAL] SUBMITTING TO PAYPAL:",
+                    withdrawalId
+                );
+
                 let payment;
 
                 try {
@@ -1524,12 +1648,6 @@ router.post(
                         )
                     );
 
-                    /*
-                        An exception during PayPal submission
-                        is not automatically a confirmed failure.
-
-                        Preserve funds and reconcile.
-                    */
                     await markPayPalReconciliationRequired(
                         withdrawalId,
                         getSafeErrorMessage(
@@ -1548,9 +1666,22 @@ router.post(
                     });
                 }
 
+                console.log(
+                    "[PAYPAL] PROVIDER RESPONSE:",
+                    {
+                        withdrawalId,
+                        success:
+                            payment?.success,
+                        status:
+                            payment?.status,
+                        paypalBatchId:
+                            payment?.paypalBatchId || ""
+                    }
+                );
+
                 /*
                 ======================================
-                PAYPAL UNKNOWN OUTCOME
+                UNKNOWN OUTCOME
                 ======================================
                 */
 
@@ -1584,15 +1715,11 @@ router.post(
                     ==================================
                     CONFIRMED FAILURE
                     ==================================
-
-                    Only a definitive provider rejection
-                    can restore the wallet.
                     */
 
                     await withdrawalManager
                         .markPaymentFailed(
                             withdrawalId,
-
                             payment?.message ||
                             "PayPal payout failed."
                         );
@@ -1610,12 +1737,117 @@ router.post(
 
                 /*
                 ======================================
-                PAYPAL ACCEPTED
-                ======================================
+                PAYPAL ACCEPTED / PROCESSING
 
                 Accepted != completed.
 
-                Keep withdrawal PROCESSING.
+                Keep local state PROCESSING unless
+                the manager explicitly reports SUCCESS.
+                ======================================
+                */
+
+                const providerStatus =
+                    normalizeStatus(
+                        payment.status
+                    );
+
+                if (
+                    providerStatus === "SUCCESS"
+                ) {
+                    /*
+                        This is only safe if the manager
+                        already verified the specific
+                        payout item as SUCCESS.
+                    */
+
+                    await withdrawalManager
+                        .markAsPaid(
+                            withdrawalId,
+                            payment.paypalTransactionId ||
+                            payment.transactionId ||
+                            "",
+
+                            payment.paypalTransactionId ||
+                            payment.transactionId ||
+                            payment.paypalBatchId ||
+                            ""
+                        );
+
+                    await withdrawalRef.update({
+                        paypalBatchId:
+                            payment.paypalBatchId ||
+                            withdrawal.paypalBatchId ||
+                            "",
+
+                        paypalItemId:
+                            payment.paypalItemId ||
+                            withdrawal.paypalItemId ||
+                            "",
+
+                        paypalBatchStatus:
+                            payment.paypalBatchStatus ||
+                            "SUCCESS",
+
+                        paypalTransactionStatus:
+                            payment.paypalTransactionStatus ||
+                            "SUCCESS",
+
+                        paypalTransactionId:
+                            payment.paypalTransactionId ||
+                            payment.transactionId ||
+                            "",
+
+                        paymentReference:
+                            payment.paypalTransactionId ||
+                            payment.transactionId ||
+                            payment.paypalBatchId ||
+                            "",
+
+                        paymentStatus:
+                            "SUCCESS",
+
+                        paymentFailureReason:
+                            "",
+
+                        reconciliationRequired:
+                            false,
+
+                        updatedAt:
+                            Date.now()
+                    });
+
+                    return res.json({
+                        success: true,
+
+                        message:
+                            "PayPal payout was confirmed successful.",
+
+                        payment: {
+                            provider:
+                                "PAYPAL",
+
+                            status:
+                                "SUCCESS",
+
+                            paypalBatchId:
+                                payment.paypalBatchId ||
+                                "",
+
+                            paypalItemId:
+                                payment.paypalItemId ||
+                                "",
+
+                            paypalTransactionStatus:
+                                payment.paypalTransactionStatus ||
+                                "SUCCESS"
+                        }
+                    });
+                }
+
+                /*
+                ======================================
+                NORMAL PROCESSING
+                ======================================
                 */
 
                 await withdrawalRef.update({
@@ -1627,6 +1859,12 @@ router.post(
                     paypalItemId:
                         payment.paypalItemId ||
                         withdrawal.paypalItemId ||
+                        "",
+
+                    paypalTransactionId:
+                        payment.paypalTransactionId ||
+                        payment.transactionId ||
+                        withdrawal.paypalTransactionId ||
                         "",
 
                     paymentReference:
@@ -1646,6 +1884,10 @@ router.post(
                     paypalBatchStatus:
                         payment.paypalBatchStatus ||
                         "PROCESSING",
+
+                    paypalTransactionStatus:
+                        payment.paypalTransactionStatus ||
+                        "",
 
                     updatedAt:
                         Date.now()
@@ -1671,17 +1913,19 @@ router.post(
 
                         paypalBatchId:
                             payment.paypalBatchId ||
-                            withdrawal.paypalBatchId ||
                             "",
 
                         paypalItemId:
                             payment.paypalItemId ||
-                            withdrawal.paypalItemId ||
                             "",
 
                         paypalBatchStatus:
                             payment.paypalBatchStatus ||
-                            "PROCESSING"
+                            "PROCESSING",
+
+                        paypalTransactionStatus:
+                            payment.paypalTransactionStatus ||
+                            ""
                     }
                 });
             }
@@ -1697,9 +1941,11 @@ router.post(
             ) {
                 return res.status(400).json({
                     success: false,
-
                     message:
-                        `Unsupported payment method: ${paymentMethod || "UNKNOWN"}`
+                        `Unsupported payment method: ${
+                            paymentMethod ||
+                            "UNKNOWN"
+                        }`
                 });
             }
 
@@ -1751,6 +1997,9 @@ router.post(
                             paymentFailureReason:
                                 "",
 
+                            reconciliationRequired:
+                                false,
+
                             updatedAt:
                                 now
                         };
@@ -1783,12 +2032,6 @@ router.post(
                 });
             }
 
-            /*
-            ==========================================
-            RELOAD AFTER CLAIM
-            ==========================================
-            */
-
             const claimedMpesaSnapshot =
                 await withdrawalRef.get();
 
@@ -1803,12 +2046,6 @@ router.post(
             const claimedWithdrawal =
                 claimedMpesaSnapshot.val();
 
-            /*
-            ==========================================
-            SEND M-PESA
-            ==========================================
-            */
-
             let payment;
 
             try {
@@ -1819,14 +2056,6 @@ router.post(
                         );
             }
             catch (mpesaError) {
-                /*
-                    M-Pesa has its own provider semantics.
-                    Do not blindly assume an exception means
-                    the provider definitely did not accept it.
-
-                    If the M-Pesa manager exposes an unknown
-                    outcome, preserve the reserved funds.
-                */
                 if (
                     isUnknownProviderError(
                         mpesaError
@@ -1918,7 +2147,6 @@ router.post(
                 await withdrawalManager
                     .markPaymentFailed(
                         withdrawalId,
-
                         payment?.message ||
                         "M-Pesa payment failed."
                     );
@@ -1995,13 +2223,11 @@ router.post(
 
             /*
             ==========================================
-            SAFETY RULE
+            PAYPAL SAFETY
             ==========================================
 
-            If PayPal is currently processing, never
-            automatically restore the wallet here.
-
-            The provider outcome must be reconciled.
+            If the local state is processing, never
+            automatically restore the wallet.
             */
 
             if (
@@ -2026,10 +2252,7 @@ router.post(
                         ) {
                             await markPayPalReconciliationRequired(
                                 withdrawalId,
-
-                                getSafeErrorMessage(
-                                    e
-                                )
+                                getSafeErrorMessage(e)
                             );
 
                             return res.status(202).json({
@@ -2054,7 +2277,6 @@ router.post(
 
             return res.status(500).json({
                 success: false,
-
                 message:
                     "Payment processing failed."
             });
@@ -2067,16 +2289,12 @@ router.post(
 MARK WITHDRAWAL AS PAID
 ====================================================
 
-IMPORTANT:
+PayPal:
 
-This endpoint should eventually be protected by
-admin authentication.
+The specific payout item must be SUCCESS.
 
-For PayPal, automatic completion should normally
-happen through the PayPal status/reconciliation flow.
-====================================================
+Batch SUCCESS alone is insufficient.
 */
-
 router.post(
     "/paid",
     async (req, res) => {
@@ -2089,16 +2307,11 @@ router.post(
             if (!withdrawalId) {
                 return res.status(400).json({
                     success: false,
-
                     message:
                         "withdrawalId is required."
                 });
             }
 
-            /*
-                Load withdrawal first so we can prevent
-                arbitrary PayPal manual completion.
-            */
             const snapshot =
                 await db
                     .ref("withdrawalRequests")
@@ -2108,7 +2321,6 @@ router.post(
             if (!snapshot.exists()) {
                 return res.status(404).json({
                     success: false,
-
                     message:
                         "Withdrawal request not found."
                 });
@@ -2123,23 +2335,31 @@ router.post(
                 );
 
             /*
-                PayPal must have provider confirmation.
+            ==========================================
+            PAYPAL PROVIDER VERIFICATION
+            ==========================================
             */
+
             if (
                 method === "PAYPAL"
             ) {
-                const paypalSuccess =
-                    isPayPalSuccess(
-                        withdrawal.paypalBatchStatus,
+                const transactionStatus =
+                    normalizeStatus(
                         withdrawal.paypalTransactionStatus
                     );
 
-                if (!paypalSuccess) {
+                /*
+                    Item-level SUCCESS is mandatory.
+                */
+                if (
+                    transactionStatus !==
+                    "SUCCESS"
+                ) {
                     return res.status(400).json({
                         success: false,
 
                         message:
-                            "A PayPal withdrawal cannot be manually marked paid until PayPal confirms SUCCESS or COMPLETED.",
+                            "A PayPal withdrawal cannot be manually marked paid until the specific PayPal payout item confirms SUCCESS.",
 
                         paypalBatchStatus:
                             withdrawal.paypalBatchStatus ||
@@ -2167,8 +2387,7 @@ router.post(
                     );
 
             /*
-                Always clear stale failure information when
-                the final state is paid.
+                Clear stale failure/reconciliation state.
             */
             if (
                 result &&
@@ -2205,7 +2424,6 @@ router.post(
 
             return res.status(400).json({
                 success: false,
-
                 message:
                     e.message
             });
@@ -2218,15 +2436,13 @@ router.post(
 UPDATE PAYPAL RECEIVER
 ====================================================
 
-Temporary recovery endpoint.
+Only permitted for a confirmed local
+payment_failed withdrawal.
 
-Only available for a confirmed local
-payment_failed state.
+A reconciliation_required withdrawal MUST NOT
+be bypassed by changing the receiver.
 
-IMPORTANT:
-
-Protect this endpoint with admin authentication
-before production.
+A new receiver represents a new payout attempt.
 ====================================================
 */
 
@@ -2249,14 +2465,13 @@ router.patch(
             if (!normalizedEmail) {
                 return res.status(400).json({
                     success: false,
-
                     error:
                         "paypalEmail is required."
                 });
             }
 
             /*
-                Basic email validation.
+                Correct email validation.
             */
             const emailValid =
                 /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -2267,7 +2482,6 @@ router.patch(
             if (!emailValid) {
                 return res.status(400).json({
                     success: false,
-
                     error:
                         "Invalid PayPal email address."
                 });
@@ -2284,7 +2498,6 @@ router.patch(
             if (!snapshot.exists()) {
                 return res.status(404).json({
                     success: false,
-
                     error:
                         "Withdrawal not found."
                 });
@@ -2301,7 +2514,9 @@ router.patch(
                     success: false,
 
                     error:
-                        `Withdrawal must be payment_failed. Current status: ${withdrawal.status}`
+                        `Withdrawal must be payment_failed. Current status: ${
+                            withdrawal.status
+                        }`
                 });
             }
 
@@ -2312,24 +2527,30 @@ router.patch(
             ) {
                 return res.status(400).json({
                     success: false,
-
                     error:
                         "Withdrawal is not a PayPal withdrawal."
                 });
             }
 
             /*
-                New receiver = new payment attempt.
+            ==========================================
+            NEW RECEIVER = NEW PAYPAL ATTEMPT
+            ==========================================
 
-                Clear old provider IDs so the next attempt
-                does not accidentally look like the previous
-                PayPal payout.
+            Clear the old provider identifiers.
+
+            The PayPal manager should generate a new
+            sender batch ID for the new attempt.
             */
+
             await withdrawalRef.update({
                 paypalEmail:
                     normalizedEmail,
 
                 paypalBatchId:
+                    "",
+
+                paypalSenderBatchId:
                     "",
 
                 paypalItemId:
@@ -2368,7 +2589,7 @@ router.patch(
                 withdrawalId,
 
                 message:
-                    "PayPal receiver updated successfully."
+                    "PayPal receiver updated successfully. The next payment attempt will use a new PayPal payout identity."
             });
         }
         catch (error) {
@@ -2379,7 +2600,6 @@ router.patch(
 
             return res.status(500).json({
                 success: false,
-
                 error:
                     "Failed to update PayPal receiver."
             });
