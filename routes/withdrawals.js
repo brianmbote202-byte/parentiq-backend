@@ -3358,118 +3358,301 @@ catch (paypalError) {
                 for definitive provider failure.
                 */
 
-                if (
-                    isPayPalFailure(
-                        providerBatchStatus,
-                        providerTransactionStatus
-                    )
-                ) {
+                /*
+======================================
+4. CONFIRMED FAILURE
+======================================
 
-                    console.log(
-                        "[PAYPAL] CONFIRMED FAILURE:",
-                        {
-                            withdrawalId,
+A payment manager result can explicitly tell us
+that the payment failed before a payout could
+have been successfully submitted.
 
-                            batchStatus:
-                                providerBatchStatus,
+This is important for failures such as:
 
-                            transactionStatus:
-                                providerTransactionStatus
-                        }
-                    );
+    - PayPal OAuth 401
+    - Invalid PayPal credentials
+    - Missing PayPal credentials
+    - Other confirmed pre-submission failures
 
+Provider-level FAILED / DENIED / CANCELED
+statuses are also treated as confirmed failures.
+*/
 
-                    /*
-                    Never move PAID backwards.
-                    */
+const managerConfirmedFailure =
+    payment?.confirmedFailure === true;
 
-                    const currentSnapshot =
-                        await withdrawalRef.get();
+const providerConfirmedFailure =
+    isPayPalFailure(
+        providerBatchStatus,
+        providerTransactionStatus
+    );
 
-                    const current =
-                        currentSnapshot.exists
-                            ? currentSnapshot.val()
-                            : null;
+const confirmedPayPalFailure =
+    managerConfirmedFailure ||
+    providerConfirmedFailure;
 
-                    const currentStatus =
-                        normalizeStatus(
-                            current?.status
-                        );
+if (
+    confirmedPayPalFailure
+) {
 
+    console.log(
+        "[PAYPAL] CONFIRMED FAILURE:",
+        {
+            withdrawalId,
 
-                    if (
-                        currentStatus ===
-                        "PAID"
-                    ) {
+            managerConfirmedFailure,
 
-                        return res.status(409).json({
+            providerConfirmedFailure,
 
-                            success:
-                                false,
+            paymentStatus:
+                payment?.status ||
+                "",
 
-                            paymentFailed:
-                                false,
+            paymentFailureReason:
+                payment?.message ||
+                payment?.paymentFailureReason ||
+                "",
 
-                            message:
-                                "PayPal reports failure, but the local withdrawal is already paid. No rollback was performed.",
+            batchStatus:
+                providerBatchStatus,
 
-                            withdrawalId
-                        });
-                    }
-
-
-                    /*
-                    Reconciliation must be handled manually.
-                    */
-
-                    if (
-                        currentStatus ===
-                        "RECONCILIATION_REQUIRED"
-                    ) {
-
-                        return res.status(409).json({
-
-                            success:
-                                false,
-
-                            reconciliationRequired:
-                                true,
-
-                            message:
-                                "PayPal reports failure, but this withdrawal is already in reconciliation. Manual reconciliation is required.",
-
-                            withdrawalId
-                        });
-                    }
+            transactionStatus:
+                providerTransactionStatus
+        }
+    );
 
 
-                    await withdrawalManager
-                        .markPaymentFailed(
-                            withdrawalId,
+    /*
+    ======================================
+    NEVER MOVE PAID BACKWARDS
+    ======================================
+    */
 
-                            `PayPal payout status: ${
-                                providerTransactionStatus ||
-                                providerBatchStatus
-                            }`
-                        );
+    const currentSnapshot =
+        await withdrawalRef.get();
 
-                    return res.status(400).json({
+    const current =
+        currentSnapshot.exists()
+            ? currentSnapshot.val()
+            : null;
 
-                        success:
-                            false,
+    const currentStatus =
+        normalizeStatus(
+            current?.status
+        );
 
-                        paymentFailed:
-                            true,
+    if (
+        currentStatus ===
+        "PAID"
+    ) {
 
-                        reconciliationRequired:
-                            false,
+        console.warn(
+            "[PAYPAL] FAILURE REPORTED AFTER LOCAL PAYMENT:",
+            {
+                withdrawalId
+            }
+        );
 
-                        message:
-                            "PayPal confirmed that the payout failed. The withdrawal was marked payment_failed and wallet funds were restored.",
+        return res.status(409).json({
 
-                        payment
-                    });
-                }
+            success:
+                false,
+
+            paymentFailed:
+                false,
+
+            reconciliationRequired:
+                true,
+
+            message:
+                "PayPal reported a failure, but the local withdrawal is already paid. No wallet rollback was performed.",
+
+            withdrawalId
+        });
+    }
+
+
+    /*
+    ======================================
+    NEVER AUTO-ROLLBACK RECONCILIATION
+    ======================================
+    */
+
+    if (
+        currentStatus ===
+        "RECONCILIATION_REQUIRED"
+    ) {
+
+        console.warn(
+            "[PAYPAL] FAILURE REPORTED FOR RECONCILIATION WITHDRAWAL:",
+            {
+                withdrawalId
+            }
+        );
+
+        return res.status(409).json({
+
+            success:
+                false,
+
+            paymentFailed:
+                false,
+
+            reconciliationRequired:
+                true,
+
+            message:
+                "PayPal reported a failure, but this withdrawal is already in reconciliation. Manual reconciliation is required.",
+
+            withdrawalId
+        });
+    }
+
+
+    /*
+    ======================================
+    DETERMINE FAILURE REASON
+    ======================================
+    */
+
+    const failureReason =
+        payment?.message ||
+        payment?.paymentFailureReason ||
+        (
+            providerTransactionStatus
+                ? `PayPal payout transaction status: ${providerTransactionStatus}`
+                : providerBatchStatus
+                    ? `PayPal payout batch status: ${providerBatchStatus}`
+                    : "PayPal payout failed before submission."
+        );
+
+
+    /*
+    ======================================
+    MARK PAYMENT FAILED
+    ======================================
+    */
+
+    await withdrawalManager
+        .markPaymentFailed(
+            withdrawalId,
+            failureReason
+        );
+
+
+    /*
+    ======================================
+    RECORD PAYPAL FAILURE STATE
+    ======================================
+    */
+
+    await withdrawalRef.update({
+
+        status:
+            "payment_failed",
+
+        paymentStatus:
+            "FAILED",
+
+        paymentFailureReason:
+            failureReason,
+
+        reconciliationRequired:
+            false,
+
+        reconciliationAt:
+            null,
+
+        paypalBatchId:
+            providerBatchId ||
+            withdrawal.paypalBatchId ||
+            "",
+
+        paypalItemId:
+            providerItemId ||
+            withdrawal.paypalItemId ||
+            "",
+
+        paypalTransactionId:
+            providerTransactionId ||
+            withdrawal.paypalTransactionId ||
+            "",
+
+        paypalBatchStatus:
+            providerBatchStatus ||
+            "",
+
+        paypalTransactionStatus:
+            providerTransactionStatus ||
+            "",
+
+        updatedAt:
+            Date.now()
+    });
+
+
+    console.log(
+        "[PAYPAL] WITHDRAWAL MARKED PAYMENT_FAILED:",
+        {
+            withdrawalId,
+
+            reason:
+                failureReason,
+
+            managerConfirmedFailure,
+
+            providerConfirmedFailure
+        }
+    );
+
+
+    return res.status(400).json({
+
+        success:
+            false,
+
+        paymentFailed:
+            true,
+
+        processing:
+            false,
+
+        reconciliationRequired:
+            false,
+
+        message:
+            "PayPal confirmed that the payout failed. The withdrawal was marked payment_failed and wallet funds were restored.",
+
+        withdrawalId,
+
+        payment: {
+
+            provider:
+                "PAYPAL",
+
+            status:
+                "FAILED",
+
+            paypalBatchId:
+                providerBatchId,
+
+            paypalItemId:
+                providerItemId,
+
+            paypalTransactionId:
+                providerTransactionId,
+
+            paypalBatchStatus:
+                providerBatchStatus,
+
+            paypalTransactionStatus:
+                providerTransactionStatus,
+
+            confirmedFailure:
+                true
+        }
+    });
+}
 
 
                 /*
