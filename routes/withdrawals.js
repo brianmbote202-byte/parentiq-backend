@@ -3349,14 +3349,7 @@ catch (paypalError) {
                 }
 
 
-                /*
-                ======================================
-                4. CONFIRMED FAILURE
-                ======================================
-
-                Wallet restoration is allowed ONLY
-                for definitive provider failure.
-                */
+             
 
                 /*
 ======================================
