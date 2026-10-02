@@ -2237,6 +2237,48 @@ router.post(
     }
 );
 
+
+/*
+==================================================
+REFRESH FIREBASE STATE BEFORE TRANSACTION
+==================================================
+*/
+
+const claimPreflightSnapshot =
+    await withdrawalRef.get();
+
+if (!claimPreflightSnapshot.exists()) {
+
+    console.error(
+        "[PAYPAL] CLAIM PREFLIGHT FAILED:",
+        {
+            withdrawalId
+        }
+    );
+
+    return res.status(404).json({
+        success: false,
+        message:
+            "Withdrawal request no longer exists."
+    });
+}
+
+const claimPreflight =
+    claimPreflightSnapshot.val();
+
+console.log(
+    "[PAYPAL] CLAIM PREFLIGHT:",
+    {
+        withdrawalId,
+        exists:
+            claimPreflightSnapshot.exists(),
+        status:
+            claimPreflight?.status || "",
+        paymentStatus:
+            claimPreflight?.paymentStatus || ""
+    }
+);
+
 const claimResult =
     await withdrawalRef.transaction(
         current => {
