@@ -128,8 +128,26 @@ class PayPalPayoutManager {
                     }
                 );
 
-            const accessToken =
-                response?.data?.access_token;
+            const accessToken = 
+    response?.data?.access_token;
+
+/*
+==================================================
+LOG PAYPAL OAUTH SCOPES
+==================================================
+
+Logs only the permissions granted to the OAuth token.
+
+IMPORTANT:
+Never log the access token or client secret.
+==================================================
+*/
+
+console.log(
+    "[PAYPAL] OAuth scopes:",
+    response?.data?.scope ||
+    "NO_SCOPE_RETURNED"
+);
 
             if (!accessToken) {
 
