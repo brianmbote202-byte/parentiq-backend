@@ -2279,6 +2279,8 @@ console.log(
     }
 );
 
+let usedPreflightFallback = false;
+
 const claimResult =
     await withdrawalRef.transaction(
         current => {
@@ -2420,7 +2422,7 @@ const claimResult =
             };
         }
     );
-    
+
 console.log(
     "[PAYPAL] CLAIM RESULT:",
     {
