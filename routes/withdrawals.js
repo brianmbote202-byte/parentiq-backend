@@ -2287,18 +2287,67 @@ const claimResult =
                 "[PAYPAL] CLAIM TRANSACTION CALLBACK:",
                 {
                     withdrawalId,
-                    currentExists: !!current,
-                    currentStatus: current?.status || "",
+                    currentExists:
+                        !!current,
+                    currentStatus:
+                        current?.status || "",
                     normalizedStatus:
-                        normalizeStatus(current?.status)
+                        normalizeStatus(
+                            current?.status
+                        ),
+                    usedPreflightFallback
                 }
             );
 
+            /*
+            ==========================================
+            FIREBASE INITIAL NULL HANDLING
+            ==========================================
+
+            Firebase may initially call the transaction
+            callback with null even though the record
+            exists remotely.
+
+            We already performed a direct GET above and
+            confirmed that this withdrawal exists.
+
+            Use that verified value for the initial
+            callback. Firebase will still perform its
+            transaction conflict check.
+            */
+
+            if (
+                current == null &&
+                !usedPreflightFallback
+            ) {
+
+                usedPreflightFallback =
+                    true;
+
+                console.log(
+                    "[PAYPAL] TRANSACTION INITIAL NULL - USING PREFLIGHT:",
+                    {
+                        withdrawalId
+                    }
+                );
+
+                current =
+                    claimPreflight;
+            }
+
+            /*
+            ==========================================
+            REAL MISSING RECORD
+            ==========================================
+            */
+
             if (!current) {
+
                 console.warn(
                     "[PAYPAL] CLAIM ABORTED: RECORD DOES NOT EXIST",
                     withdrawalId
                 );
+
                 return;
             }
 
@@ -2306,6 +2355,12 @@ const claimResult =
                 normalizeStatus(
                     current.status
                 );
+
+            /*
+            ==========================================
+            CLAIMABLE STATUS
+            ==========================================
+            */
 
             if (
                 currentStatus !== "APPROVED" &&
@@ -2331,7 +2386,8 @@ const claimResult =
                 {
                     withdrawalId,
                     currentStatus,
-                    newStatus: "processing"
+                    newStatus:
+                        "processing"
                 }
             );
 
@@ -2364,7 +2420,7 @@ const claimResult =
             };
         }
     );
-
+    
 console.log(
     "[PAYPAL] CLAIM RESULT:",
     {
