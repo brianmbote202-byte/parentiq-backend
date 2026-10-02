@@ -2703,45 +2703,71 @@ if (
 // M-PESA B2C RESULT CALLBACK
 //======================================================
 
+/*
+==================================================
+M-PESA B2C RESULT CALLBACK
+==================================================
+*/
+
+/*
+==========================================
+M-PESA B2C RESULT CALLBACK
+==========================================
+*/
+
 app.post("/mpesa/b2c/result", async (req, res) => {
 
-    console.log(
-        "================================"
-    );
-
-    console.log(
-        "B2C RESULT CALLBACK"
-    );
-
-    console.log(
-        "================================"
-    );
-
-
-    console.log(
-        JSON.stringify(
-            req.body,
-            null,
-            2
-        )
-    );
-
+    console.log("========================================");
+    console.log("M-PESA B2C RESULT CALLBACK");
+    console.log("========================================");
 
     try {
 
+        console.log(
+            "B2C RESULT BODY:",
+            JSON.stringify(req.body, null, 2)
+        );
+
+        /*
+        ==========================================
+        SAFARICOM RESULT OBJECT
+        ==========================================
+        */
+
         const result =
-            req.body?.Result || {};
+            req.body?.Result ||
+            req.body ||
+            {};
+
+        const originatorConversationId =
+            result.OriginatorConversationID ||
+            req.body?.OriginatorConversationID ||
+            "";
+
+        const resultCode =
+            Number(result.ResultCode);
+
+        console.log(
+            "OriginatorConversationID:",
+            originatorConversationId || "(missing)"
+        );
+
+        console.log(
+            "ResultCode:",
+            result.ResultCode ?? "(missing)"
+        );
+
+        console.log(
+            "ResultDesc:",
+            result.ResultDesc || ""
+        );
 
 
         /*
-        ==================================================
-        ORIGINATOR CONVERSATION ID
-        ==================================================
+        ==========================================
+        ALWAYS ACK SAFARICOM IF IDENTIFIER MISSING
+        ==========================================
         */
-
-        const originatorConversationId =
-            result.OriginatorConversationID;
-
 
         if (!originatorConversationId) {
 
@@ -2749,34 +2775,24 @@ app.post("/mpesa/b2c/result", async (req, res) => {
                 "B2C callback missing OriginatorConversationID."
             );
 
-
             return res.json({
-
                 ResultCode: 0,
-
-                ResultDesc:
-                    "Accepted"
-
+                ResultDesc: "Accepted"
             });
-
         }
 
 
         /*
-        ==================================================
+        ==========================================
         FIND PAYMENT
-        ==================================================
+        ==========================================
         */
 
         const paymentQuery =
             await db
                 .ref("payments")
-                .orderByChild(
-                    "originatorConversationId"
-                )
-                .equalTo(
-                    originatorConversationId
-                )
+                .orderByChild("originatorConversationId")
+                .equalTo(originatorConversationId)
                 .once("value");
 
 
@@ -2787,32 +2803,21 @@ app.post("/mpesa/b2c/result", async (req, res) => {
                 originatorConversationId
             );
 
-
             return res.json({
-
                 ResultCode: 0,
-
-                ResultDesc:
-                    "Accepted"
-
+                ResultDesc: "Accepted"
             });
-
         }
 
-
-        /*
-        ==================================================
-        GET PAYMENT
-        ==================================================
-        */
 
         const paymentData =
             paymentQuery.val();
 
-
         const paymentKey =
             Object.keys(paymentData)[0];
 
+        const payment =
+            paymentData[paymentKey];
 
         const paymentRef =
             db
@@ -2820,78 +2825,118 @@ app.post("/mpesa/b2c/result", async (req, res) => {
                 .child(paymentKey);
 
 
-        const payment =
-            paymentData[paymentKey];
+        /*
+        ==========================================
+        TERMINAL PAYMENT STATES
+        ==========================================
+        */
+
+        const currentPaymentStatus =
+            payment.status;
 
 
         /*
-        ==================================================
-        PREVENT DUPLICATE PROCESSING
-        ==================================================
+        ==========================================
+        ALREADY SUCCESS
+        ==========================================
         */
 
         if (
-            payment.status ===
+            currentPaymentStatus ===
             PaymentStatus.SUCCESS
         ) {
 
             console.log(
-                "B2C payment already completed:",
-                originatorConversationId
+                "B2C payment already SUCCESS:",
+                paymentKey
             );
 
-
             return res.json({
-
                 ResultCode: 0,
-
-                ResultDesc:
-                    "Accepted"
-
+                ResultDesc: "Accepted"
             });
-
         }
 
 
         /*
-        ==================================================
-        B2C SUCCESS
-        ==================================================
+        ==========================================
+        ALREADY CONFIRMED FAILED
+        ==========================================
         */
 
         if (
-            Number(result.ResultCode) === 0
+            currentPaymentStatus ===
+            PaymentStatus.FAILED &&
+            payment.unknownOutcome !== true &&
+            payment.reconciliationRequired !== true
         ) {
 
             console.log(
-                "B2C SUCCESS"
+                "B2C payment already FAILED:",
+                paymentKey
             );
 
+            return res.json({
+                ResultCode: 0,
+                ResultDesc: "Accepted"
+            });
+        }
+
+
+        /*
+        ==========================================
+        CONFIRMED SUCCESS
+        ==========================================
+        */
+
+        if (resultCode === 0) {
+
+            const receipt =
+                result.TransactionID ||
+                "";
+
+            const providerReference =
+                result.ConversationID ||
+                "";
+
+            /*
+            ------------------------------------------
+            MARK PAYMENT SUCCESS
+            ------------------------------------------
+            */
 
             await paymentRef.update({
 
                 status:
                     PaymentStatus.SUCCESS,
 
-                receipt:
-                    result.TransactionID || "",
+                receipt,
 
-                providerReference:
-                    result.ConversationID || "",
+                providerReference,
+
+                resultCode: 0,
+
+                reconciliationRequired:
+                    false,
+
+                unknownOutcome:
+                    false,
 
                 completedAt:
                     Date.now(),
 
                 callback:
-                    req.body
+                    req.body,
 
+                updatedAt:
+                    Date.now()
             });
 
 
             /*
-            ----------------------------------------------
-            MARK WITHDRAWAL AS PAID
-            ----------------------------------------------
+            ------------------------------------------
+            MARK WITHDRAWAL PAID
+            ------------------------------------------
             */
 
             if (payment.withdrawalId) {
@@ -2900,117 +2945,179 @@ app.post("/mpesa/b2c/result", async (req, res) => {
 
                     payment.withdrawalId,
 
-                    result.TransactionID || ""
+                    receipt,
 
+                    providerReference,
+
+                    {
+
+                        mpesaReceipt:
+                            receipt,
+
+                        mpesaConversationId:
+                            providerReference,
+
+                        mpesaResult:
+                            req.body
+                    }
                 );
-
             }
 
-        }
-
-
-        /*
-        ==================================================
-        B2C FAILURE
-        ==================================================
-        */
-
-        else {
 
             console.log(
-                "B2C FAILED"
+                "========================================"
+            );
+
+            console.log(
+                "B2C SUCCESS"
+            );
+
+            console.log(
+                "Payment:",
+                paymentKey
+            );
+
+            console.log(
+                "Withdrawal:",
+                payment.withdrawalId || "(none)"
+            );
+
+            console.log(
+                "Receipt:",
+                receipt || "(none)"
+            );
+
+            console.log(
+                "========================================"
             );
 
 
-            await paymentRef.update({
+            return res.json({
 
-                status:
-                    PaymentStatus.FAILED,
+                ResultCode: 0,
 
-                error:
-                    result.ResultDesc || "B2C payment failed",
-
-                resultCode:
-                    result.ResultCode,
-
-                completedAt:
-                    Date.now(),
-
-                callback:
-                    req.body
+                ResultDesc: "Accepted"
 
             });
-
-
-            /*
-            ----------------------------------------------
-            MARK WITHDRAWAL PAYMENT FAILED
-            ----------------------------------------------
-            */
-
-            if (payment.withdrawalId) {
-
-                await WithdrawalManager.markPaymentFailed(
-
-                    payment.withdrawalId,
-
-                    result.ResultDesc ||
-                        "B2C payment failed"
-
-                );
-
-            }
-
         }
 
 
         /*
-        ==================================================
-        ACKNOWLEDGE SAFARICOM
-        ==================================================
+        ==========================================
+        CONFIRMED FAILURE
+        ==========================================
         */
+
+        const failureReason =
+            result.ResultDesc ||
+            "B2C payment failed";
+
+
+        await paymentRef.update({
+
+            status:
+                PaymentStatus.FAILED,
+
+            error:
+                failureReason,
+
+            resultCode,
+
+            reconciliationRequired:
+                false,
+
+            unknownOutcome:
+                false,
+
+            completedAt:
+                Date.now(),
+
+            callback:
+                req.body,
+
+            updatedAt:
+                Date.now()
+        });
+
+
+        /*
+        ------------------------------------------
+        RESTORE WITHDRAWAL / WALLET
+        ------------------------------------------
+        */
+
+        if (payment.withdrawalId) {
+
+            await WithdrawalManager.markPaymentFailed(
+
+                payment.withdrawalId,
+
+                failureReason
+            );
+        }
+
+
+        console.log(
+            "========================================"
+        );
+
+        console.log(
+            "B2C FAILED"
+        );
+
+        console.log(
+            "Payment:",
+            paymentKey
+        );
+
+        console.log(
+            "Withdrawal:",
+            payment.withdrawalId || "(none)"
+        );
+
+        console.log(
+            "Reason:",
+            failureReason
+        );
+
+        console.log(
+            "========================================"
+        );
+
 
         return res.json({
 
             ResultCode: 0,
 
-            ResultDesc:
-                "Accepted"
+            ResultDesc: "Accepted"
 
         });
 
+    }
 
-    } catch (error) {
+    catch (error) {
 
         console.error(
             "B2C callback processing failed:",
             error
         );
 
-
         /*
-        IMPORTANT:
-        Always acknowledge Safaricom.
+        ==========================================
+        ALWAYS ACK SAFARICOM
+        ==========================================
         */
 
         return res.json({
 
             ResultCode: 0,
 
-            ResultDesc:
-                "Accepted"
+            ResultDesc: "Accepted"
 
         });
-
     }
-
 });
 
-/*
-==========================================
-B2C TIMEOUT CALLBACK
-==========================================
-*/
 
 /*
 ==========================================
@@ -3020,20 +3127,51 @@ B2C TIMEOUT CALLBACK
 
 app.post("/mpesa/b2c/timeout", async (req, res) => {
 
-    console.log("================================");
-    console.log("B2C TIMEOUT CALLBACK");
-    console.log("================================");
+    console.log("========================================");
+    console.log("M-PESA B2C TIMEOUT CALLBACK");
+    console.log("========================================");
 
-    console.log(JSON.stringify(req.body, null, 2));
+    console.log(
+        JSON.stringify(req.body, null, 2)
+    );
 
     try {
 
+        /*
+        ==========================================
+        SAFARICOM PAYLOAD
+        ==========================================
+        */
+
+        const result =
+            req.body?.Result ||
+            req.body ||
+            {};
+
+
         const localOriginatorConversationId =
-            req.body.OriginatorConversationID;
+            result.OriginatorConversationID ||
+            req.body?.OriginatorConversationID ||
+            "";
+
+
+        console.log(
+            "OriginatorConversationID:",
+            localOriginatorConversationId || "(missing)"
+        );
+
+
+        /*
+        ==========================================
+        MISSING IDENTIFIER
+        ==========================================
+        */
 
         if (!localOriginatorConversationId) {
 
-            console.log("Missing OriginatorConversationID");
+            console.log(
+                "Missing OriginatorConversationID"
+            );
 
             return res.json({
 
@@ -3042,13 +3180,13 @@ app.post("/mpesa/b2c/timeout", async (req, res) => {
                 ResultDesc: "Accepted"
 
             });
-
         }
 
+
         /*
-        ======================================
-        FIND PAYMENT USING OUR LOCAL ID
-        ======================================
+        ==========================================
+        FIND PAYMENT
+        ==========================================
         */
 
         const paymentQuery =
@@ -3057,6 +3195,7 @@ app.post("/mpesa/b2c/timeout", async (req, res) => {
                 .orderByChild("localOriginatorConversationId")
                 .equalTo(localOriginatorConversationId)
                 .once("value");
+
 
         if (!paymentQuery.exists()) {
 
@@ -3072,54 +3211,154 @@ app.post("/mpesa/b2c/timeout", async (req, res) => {
                 ResultDesc: "Accepted"
 
             });
-
         }
 
+
+        const paymentData =
+            paymentQuery.val();
+
         const paymentKey =
-            Object.keys(paymentQuery.val())[0];
+            Object.keys(paymentData)[0];
 
         const payment =
-            paymentQuery.val()[paymentKey];
+            paymentData[paymentKey];
 
         const paymentRef =
-            db.ref("payments").child(paymentKey);
+            db
+                .ref("payments")
+                .child(paymentKey);
+
 
         /*
-        ======================================
-        MARK PAYMENT FAILED
-        ======================================
+        ==========================================
+        DO NOT MARK TIMEOUT AS CONFIRMED FAILURE
+        ==========================================
+
+        A timeout only means that the provider response
+        was not received in time.
+
+        The transaction may still have completed.
+
+        Therefore:
+
+        PENDING
+        reconciliationRequired = true
+        unknownOutcome = true
+
+        NO wallet restoration.
+        NO markPaymentFailed().
+        ==========================================
         */
+
+
+        if (
+            payment.status ===
+            PaymentStatus.SUCCESS
+        ) {
+
+            console.log(
+                "Timeout received but payment is already SUCCESS:",
+                paymentKey
+            );
+
+            return res.json({
+
+                ResultCode: 0,
+
+                ResultDesc: "Accepted"
+
+            });
+        }
+
 
         await paymentRef.update({
 
-            status: PaymentStatus.FAILED,
+            status:
+                PaymentStatus.PENDING,
 
-            error: "TIMEOUT",
+            error:
+                "M-Pesa B2C timeout. Provider outcome requires reconciliation.",
 
-            completedAt: Date.now(),
+            reconciliationRequired:
+                true,
 
-            callback: req.body
+            unknownOutcome:
+                true,
 
+            timeout:
+                true,
+
+            timeoutAt:
+                Date.now(),
+
+            callback:
+                req.body,
+
+            updatedAt:
+                Date.now()
         });
 
+
         /*
-        ======================================
-        MARK WITHDRAWAL FAILED
-        ======================================
+        ==========================================
+        MARK WITHDRAWAL FOR RECONCILIATION
+        ==========================================
         */
 
-        await WithdrawalManager.markPaymentFailed(
+        if (payment.withdrawalId) {
 
-            payment.withdrawalId,
+            await db
+                .ref("withdrawals")
+                .child(payment.withdrawalId)
+                .update({
 
-            "Timeout"
+                    status:
+                        "reconciliation_required",
 
+                    paymentStatus:
+                        "RECONCILIATION_REQUIRED",
+
+                    paymentFailureReason:
+                        "M-Pesa B2C timeout. Provider outcome requires reconciliation.",
+
+                    reconciliationRequired:
+                        true,
+
+                    reconciliationAt:
+                        Date.now(),
+
+                    updatedAt:
+                        Date.now()
+                });
+        }
+
+
+        console.log(
+            "========================================"
         );
 
         console.log(
-            "Withdrawal marked as PAYMENT_FAILED:",
-            payment.withdrawalId
+            "B2C TIMEOUT — RECONCILIATION REQUIRED"
         );
+
+        console.log(
+            "Payment:",
+            paymentKey
+        );
+
+        console.log(
+            "Withdrawal:",
+            payment.withdrawalId || "(none)"
+        );
+
+        console.log(
+            "No wallet restoration performed."
+        );
+
+        console.log(
+            "========================================"
+        );
+
 
         return res.json({
 
@@ -3131,9 +3370,18 @@ app.post("/mpesa/b2c/timeout", async (req, res) => {
 
     }
 
-    catch (e) {
+    catch (error) {
 
-        console.error("B2C Timeout Error:", e);
+        console.error(
+            "B2C Timeout Error:",
+            error
+        );
+
+        /*
+        ==========================================
+        ALWAYS ACK SAFARICOM
+        ==========================================
+        */
 
         return res.json({
 
@@ -3142,7 +3390,6 @@ app.post("/mpesa/b2c/timeout", async (req, res) => {
             ResultDesc: "Accepted"
 
         });
-
     }
 
 });
