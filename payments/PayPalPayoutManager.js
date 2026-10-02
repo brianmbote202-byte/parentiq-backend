@@ -159,11 +159,14 @@ class PayPalPayoutManager {
         catch (error) {
 
             console.error(
-                "[PAYPAL] ACCESS TOKEN ERROR:",
-                error.response?.status ||
-                error.code ||
-                error.message
-            );
+    "[PAYPAL] ACCESS TOKEN ERROR:",
+    {
+        status: error.response?.status || 0,
+        code: error.code || "",
+        message: error.message || "",
+        paypalResponse: error.response?.data || null
+    }
+);
 
             const status =
                 Number(
