@@ -1,4 +1,4 @@
-const axios = require("axios");
+﻿const axios = require("axios");
 const { db } = require("../firebase");
 
 class PayPalPayoutManager {
@@ -787,13 +787,51 @@ class PayPalPayoutManager {
         const itemReversed =
             transaction === "REVERSED";
 
+
+            /*
+==========================================
+BLOCKED
+==========================================
+
+A BLOCKED payout is not ordinary processing.
+
+Do not assume it will complete.
+Keep funds reserved and require reconciliation.
+==========================================
+*/
+
+if (
+    transaction === "BLOCKED"
+) {
+
+    return {
+
+        outcome:
+            "RECONCILIATION_REQUIRED",
+
+        paypalSuccess:
+            false,
+
+        paypalFailure:
+            false,
+
+        paypalProcessing:
+            false,
+
+        unknownOutcome:
+            true,
+
+        reconciliationRequired:
+            true
+    };
+}
+
         const itemProcessing =
-            (
-                transaction === "PENDING" ||
-                transaction === "UNCLAIMED" ||
-                transaction === "ONHOLD" ||
-                transaction === "BLOCKED"
-            );
+    (
+        transaction === "PENDING" ||
+        transaction === "UNCLAIMED" ||
+        transaction === "ONHOLD"
+    );
 
         const batchDenied =
             batch === "DENIED";
@@ -1173,21 +1211,56 @@ class PayPalPayoutManager {
         }
         catch (error) {
 
-            console.error(
-                "[PAYPAL] PAYMENT LOOKUP ERROR:",
-                error.message
-            );
+    console.error(
+        "[PAYPAL] PAYMENT LOOKUP ERROR:",
+        error.message
+    );
 
-            /*
-            Do not classify lookup failure as a payout
-            failure.
+    /*
+    ==========================================
+    FAIL CLOSED
+    ==========================================
 
-            The payout route owns the atomic withdrawal
-            processing claim.
-            */
+    A Firebase lookup failure does NOT mean
+    that no payment exists.
 
-            return null;
-        }
+    Never continue to PayPal when we cannot
+    verify the existing local payment record.
+
+    This prevents:
+
+        Firebase read failure
+            â†“
+        "no payment found"
+            â†“
+        create duplicate payment
+            â†“
+        submit another payout
+    ==========================================
+    */
+
+    const lookupError =
+        new Error(
+            "Unable to verify the existing PayPal payment record."
+        );
+
+    lookupError.code =
+        "PAYPAL_PAYMENT_LOOKUP_FAILED";
+
+    lookupError.unknownOutcome =
+        true;
+
+    lookupError.reconciliationRequired =
+        true;
+
+    lookupError.confirmedFailure =
+        false;
+
+    lookupError.cause =
+        error;
+
+    throw lookupError;
+}
     }
 
 
@@ -2395,7 +2468,7 @@ class PayPalPayoutManager {
             return {
 
                 success:
-                    true,
+                    false,
 
                 paymentId,
 
@@ -2431,7 +2504,7 @@ class PayPalPayoutManager {
                     false,
 
                 message:
-                    "PayPal payout accepted."
+                    "PayPal payout accepted and is still processing."
             };
 
         }
@@ -3032,55 +3105,52 @@ class PayPalPayoutManager {
 
             return {
 
-                success:
-                    true,
+    paypalBatchId:
+        payoutBatchId,
 
-                paypalBatchId:
-                    payoutBatchId,
+    batchStatus,
 
-                batchStatus,
+    senderBatchId,
 
-                senderBatchId,
+    paypalItemId,
 
-                paypalItemId,
+    transactionId,
 
-                transactionId,
+    transactionStatus,
 
-                transactionStatus,
+    batchErrors,
 
-                batchErrors,
+    itemErrors,
 
-                itemErrors,
+    payoutItem,
 
-                payoutItem,
+    items,
 
-                items,
+    itemFound:
+        Boolean(item),
 
-                itemFound:
-                    Boolean(item),
+    itemIdentificationRequired,
 
-                itemIdentificationRequired,
+    paypalSuccess:
+        evaluation.paypalSuccess,
 
-                paypalSuccess:
-                    evaluation.paypalSuccess,
+    paypalFailure:
+        evaluation.paypalFailure,
 
-                paypalFailure:
-                    evaluation.paypalFailure,
+    paypalProcessing:
+        evaluation.paypalProcessing,
 
-                paypalProcessing:
-                    evaluation.paypalProcessing,
+    unknownOutcome:
+        evaluation.unknownOutcome,
 
-                unknownOutcome:
-                    evaluation.unknownOutcome,
+    reconciliationRequired:
+        evaluation.reconciliationRequired,
 
-                reconciliationRequired:
-                    evaluation.reconciliationRequired,
+    outcome:
+        evaluation.outcome,
 
-                outcome:
-                    evaluation.outcome,
-
-                data
-            };
+    data
+};
 
         }
         catch (error) {
@@ -3159,3 +3229,5 @@ EXPORT SINGLE MANAGER INSTANCE
 
 module.exports =
     new PayPalPayoutManager();
+
+
