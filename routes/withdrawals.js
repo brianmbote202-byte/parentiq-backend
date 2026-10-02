@@ -2679,53 +2679,266 @@ console.log(
                             );
 
                 }
-                catch (paypalError) {
+                
+catch (paypalError) {
 
-                    console.error(
-                        "[PAYPAL SEND ERROR]",
-                        {
-                            withdrawalId,
+    console.error(
+        "[PAYPAL SEND ERROR]",
+        {
+            withdrawalId,
 
-                            message:
-                                getSafeErrorMessage(
-                                    paypalError
-                                ),
+            message:
+                getSafeErrorMessage(
+                    paypalError
+                ),
 
-                            code:
-                                paypalError?.code ||
-                                "",
+            code:
+                paypalError?.code ||
+                "",
 
-                            httpStatus:
-                                paypalError?.response?.status ||
-                                ""
-                        }
-                    );
+            httpStatus:
+                paypalError?.response?.status ||
+                "",
 
-                    /*
-                        NEVER assume a thrown PayPal
-                        submission error means failure.
+            unknownOutcome:
+                paypalError?.unknownOutcome === true,
 
-                        The request may have reached PayPal.
-                    */
+            reconciliationRequired:
+                paypalError?.reconciliationRequired === true,
 
-                    await markPayPalReconciliationRequired(
-                        withdrawalId,
-                        getSafeErrorMessage(
-                            paypalError
-                        )
-                    );
+            confirmedFailure:
+                paypalError?.confirmedFailure === true
+        }
+    );
 
-                    return res.status(202).json({
+    /*
+    ============================================================
+    PAYPAL ERROR CLASSIFICATION
+    ============================================================
 
-                        success: false,
+    We must NOT assume that every thrown PayPal error means
+    the payout definitely failed.
 
-                        reconciliationRequired:
-                            true,
+    There are three possible cases:
 
-                        message:
-                            "PayPal payout outcome is uncertain. The withdrawal has been placed into reconciliation."
-                    });
-                }
+    1. CONFIRMED FAILURE
+       We know the payout could not have succeeded.
+
+       Example:
+       - Invalid PayPal credentials
+       - Invalid request rejected before submission
+       - Known provider validation failure
+
+       These can safely become PAYMENT_FAILED.
+
+    2. UNKNOWN OUTCOME
+       PayPal may have received the payout request, but we
+       cannot establish the final result.
+
+       These MUST go to reconciliation.
+
+    3. UNCLASSIFIED ERROR
+       We do not have enough information to determine what
+       happened.
+
+       These also go to reconciliation for safety.
+
+    IMPORTANT:
+    Only an error explicitly marked confirmedFailure=true
+    is automatically treated as a confirmed payment failure.
+    ============================================================
+    */
+
+    const isConfirmedFailure =
+        paypalError?.confirmedFailure === true;
+
+    const isUnknownOutcome =
+        paypalError?.unknownOutcome === true ||
+        paypalError?.reconciliationRequired === true;
+
+
+    /*
+    ============================================================
+    1. CONFIRMED PAYMENT FAILURE
+    ============================================================
+    */
+
+    if (
+        isConfirmedFailure &&
+        !isUnknownOutcome
+    ) {
+
+        console.log(
+            "[PAYPAL] CONFIRMED PRE-SUBMISSION FAILURE:",
+            {
+                withdrawalId,
+
+                code:
+                    paypalError?.code ||
+                    "",
+
+                httpStatus:
+                    paypalError?.response?.status ||
+                    ""
+            }
+        );
+
+        /*
+        Mark the withdrawal as payment_failed.
+
+        WithdrawalManager is responsible for the existing
+        wallet restoration / ledger reversal logic.
+        */
+
+        await withdrawalManager
+            .markPaymentFailed(
+                withdrawalId,
+                getSafeErrorMessage(
+                    paypalError
+                )
+            );
+
+        return res.status(400).json({
+
+            success: false,
+
+            paymentFailed: true,
+
+            processing: false,
+
+            reconciliationRequired: false,
+
+            message:
+                "PayPal payment could not be submitted. The withdrawal was marked payment_failed and wallet funds were restored.",
+
+            withdrawalId
+        });
+    }
+
+
+    /*
+    ============================================================
+    2. UNKNOWN PAYPAL OUTCOME
+    ============================================================
+    */
+
+    if (
+        isUnknownOutcome
+    ) {
+
+        console.warn(
+            "[PAYPAL] UNKNOWN OUTCOME - RECONCILIATION REQUIRED:",
+            {
+                withdrawalId,
+
+                code:
+                    paypalError?.code ||
+                    "",
+
+                httpStatus:
+                    paypalError?.response?.status ||
+                    ""
+            }
+        );
+
+        /*
+        DO NOT restore wallet funds here.
+
+        The payout may already exist at PayPal.
+
+        Reconciliation must determine the actual provider
+        result before the wallet can safely be released.
+        */
+
+        await markPayPalReconciliationRequired(
+            withdrawalId,
+            getSafeErrorMessage(
+                paypalError
+            )
+        );
+
+        return res.status(202).json({
+
+            success: false,
+
+            paymentFailed: false,
+
+            processing: false,
+
+            reconciliationRequired: true,
+
+            message:
+                "PayPal payout outcome is uncertain. The withdrawal has been placed into reconciliation.",
+
+            withdrawalId
+        });
+    }
+
+
+    /*
+    ============================================================
+    3. UNCLASSIFIED ERROR
+    ============================================================
+
+    If PayPal's error does not explicitly tell us that the
+    payment definitely failed, we must assume the outcome
+    could be uncertain.
+
+    Therefore:
+
+        DO NOT restore wallet funds.
+        DO NOT mark PAYMENT_FAILED.
+        DO NOT allow another payout submission.
+
+    Instead place the withdrawal into reconciliation.
+    ============================================================
+    */
+
+    console.warn(
+        "[PAYPAL] UNCLASSIFIED ERROR - RECONCILIATION REQUIRED:",
+        {
+            withdrawalId,
+
+            code:
+                paypalError?.code ||
+                "",
+
+            httpStatus:
+                paypalError?.response?.status ||
+                "",
+
+            message:
+                getSafeErrorMessage(
+                    paypalError
+                )
+        }
+    );
+
+    await markPayPalReconciliationRequired(
+        withdrawalId,
+        getSafeErrorMessage(
+            paypalError
+        )
+    );
+
+    return res.status(202).json({
+
+        success: false,
+
+        paymentFailed: false,
+
+        processing: false,
+
+        reconciliationRequired: true,
+
+        message:
+            "PayPal payment outcome could not be established. The withdrawal remains reserved for reconciliation.",
+
+        withdrawalId
+    });
+}
+
+
 
 
                 console.log(
