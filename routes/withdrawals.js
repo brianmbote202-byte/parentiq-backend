@@ -2136,57 +2136,64 @@ router.post(
                 );
 
 
-            /*
-            ==========================================
-            VALIDATE STATUS
-            ==========================================
-            */
+            
+/*
+==========================================
+VALIDATE STATUS
+==========================================
+*/
 
-            if (
-                initialStatus !== "APPROVED" &&
-                initialStatus !== "PAYMENT_FAILED"
-            ) {
+const reconciliationRequired =
+    initialStatus === "RECONCILIATION_REQUIRED";
 
-                let message =
-                    "Withdrawal must be approved before payment.";
 
-                if (
-                    initialStatus ===
-                    "PROCESSING"
-                ) {
+if (
+    initialStatus !== "APPROVED" &&
+    initialStatus !== "PAYMENT_FAILED" &&
+    !reconciliationRequired
+) {
 
-                    message =
-                        "This withdrawal is already being processed.";
-                }
+    let message =
+        "Withdrawal must be approved before payment.";
 
-                if (
-                    initialStatus ===
-                    "PAID"
-                ) {
+    if (
+        initialStatus ===
+        "PROCESSING"
+    ) {
 
-                    message =
-                        "This withdrawal has already been paid.";
-                }
+        message =
+            "This withdrawal is already being processed.";
+    }
 
-                if (
-                    initialStatus ===
-                    "RECONCILIATION_REQUIRED"
-                ) {
+    if (
+        initialStatus ===
+        "PAID"
+    ) {
 
-                    message =
-                        "This withdrawal requires reconciliation before another payment attempt.";
-                }
+        message =
+            "This withdrawal has already been paid.";
+    }
 
-                return res.status(400).json({
+    if (
+        initialStatus ===
+        "REJECTED"
+    ) {
 
-                    success: false,
+        message =
+            "This withdrawal has been rejected.";
+    }
 
-                    message,
+    return res.status(400).json({
 
-                    status:
-                        withdrawal.status
-                });
-            }
+        success: false,
+
+        message,
+
+        status:
+            withdrawal.status
+    });
+}
+
 
 
             /*
@@ -2358,27 +2365,31 @@ const claimResult =
                     current.status
                 );
 
-            /*
-            ==========================================
-            CLAIMABLE STATUS
-            ==========================================
-            */
+           
+/*
+==========================================
+CLAIMABLE STATUS
+==========================================
+*/
 
-            if (
-                currentStatus !== "APPROVED" &&
-                currentStatus !== "PAYMENT_FAILED"
-            ) {
+if (
+    currentStatus !== "APPROVED" &&
+    currentStatus !== "PAYMENT_FAILED" &&
+    currentStatus !== "RECONCILIATION_REQUIRED"
+) {
 
-                console.warn(
-                    "[PAYPAL] CLAIM ABORTED: STATUS NOT CLAIMABLE:",
-                    {
-                        withdrawalId,
-                        currentStatus
-                    }
-                );
+    console.warn(
+        "[PAYPAL] CLAIM ABORTED: STATUS NOT CLAIMABLE:",
+        {
+            withdrawalId,
+            currentStatus
+        }
+    );
 
-                return;
-            }
+    return;
+}
+
+
 
             const now =
                 Date.now();
