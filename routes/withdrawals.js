@@ -3955,10 +3955,16 @@ const mpesaClaimResult =
                 }
             );
 
+            /*
+            ==========================================
+            FIREBASE INITIAL NULL CALLBACK
+            ==========================================
+            */
+
             if (!current) {
 
                 console.warn(
-                    "[MPESA CLAIM] ABORT: RECORD DOES NOT EXIST:",
+                    "[MPESA CLAIM] INITIAL NULL CALLBACK - RETRYING:",
                     withdrawalId
                 );
 
@@ -4041,7 +4047,6 @@ const mpesaClaimResult =
         }
     );
 
-
 console.log(
     "[MPESA CLAIM] RESULT:",
     {
@@ -4060,7 +4065,84 @@ console.log(
             mpesaClaimResult.snapshot.val()?.paymentStatus || ""
     }
 );
+/*
+==========================================
+VERIFY M-PESA CLAIM
+==========================================
+*/
 
+if (
+    !mpesaClaimResult.committed
+) {
+
+    console.warn(
+        "[MPESA CLAIM] NOT COMMITTED - PAYMENT WILL NOT BE SENT:",
+        {
+            withdrawalId,
+
+            committed:
+                mpesaClaimResult.committed,
+
+            snapshotExists:
+                mpesaClaimResult.snapshot.exists(),
+
+            snapshotStatus:
+                mpesaClaimResult.snapshot.val()?.status || "",
+
+            snapshotPaymentStatus:
+                mpesaClaimResult.snapshot.val()?.paymentStatus || ""
+        }
+    );
+
+    const latestSnapshot =
+        await withdrawalRef.get();
+
+    const latest =
+        latestSnapshot.exists()
+            ? latestSnapshot.val()
+            : null;
+
+    const latestStatus =
+        normalizeStatus(
+            latest?.status
+        );
+
+    console.warn(
+        "[MPESA CLAIM] LATEST FIREBASE STATE:",
+        {
+            withdrawalId,
+            latestStatus,
+            paymentStatus:
+                latest?.paymentStatus || ""
+        }
+    );
+
+    return res.status(409).json({
+
+        success: false,
+
+        message:
+            latestStatus ===
+            "PROCESSING"
+
+                ? "This withdrawal is already being processed."
+
+                : latestStatus ===
+                "PAID"
+
+                    ? "This withdrawal has already been paid."
+
+                    : latestStatus ===
+                    "RECONCILIATION_REQUIRED"
+
+                        ? "This withdrawal requires reconciliation before another payment attempt."
+
+                        : "Withdrawal payment claim could not be completed. No payment was sent.",
+
+        status:
+            latest?.status || ""
+    });
+}
 
             const claimedMpesaSnapshot =
                 await withdrawalRef.get();
