@@ -3913,108 +3913,153 @@ if (
             ==========================================
             */
 
-            const mpesaClaimResult =
-                await withdrawalRef
-                    .transaction(
-                        current => {
+            console.log(
+    "[MPESA CLAIM] BEFORE TRANSACTION:",
+    {
+        withdrawalId,
+        initialStatus,
+        firebaseStatus:
+            withdrawal.status,
+        paymentStatus:
+            withdrawal.paymentStatus,
+        paymentAttemptCount:
+            withdrawal.paymentAttemptCount || 0
+    }
+);
 
-                            if (!current) {
-                                return;
-                            }
+const mpesaClaimResult =
+    await withdrawalRef.transaction(
+        current => {
 
-                            const currentStatus =
-                                normalizeStatus(
-                                    current.status
-                                );
+            console.log(
+                "[MPESA CLAIM] TRANSACTION CURRENT:",
+                {
+                    withdrawalId,
 
-                            if (
-                                currentStatus !==
-                                    "APPROVED" &&
-                                currentStatus !==
-                                    "PAYMENT_FAILED"
-                            ) {
+                    currentExists:
+                        !!current,
 
-                                return;
-                            }
+                    currentStatus:
+                        current?.status || "",
 
-                            const now =
-                                Date.now();
+                    normalizedStatus:
+                        normalizeStatus(
+                            current?.status
+                        ),
 
-                            return {
+                    paymentStatus:
+                        current?.paymentStatus || "",
 
-                                ...current,
+                    paymentAttemptCount:
+                        current?.paymentAttemptCount || 0
+                }
+            );
 
-                                status:
-                                    "processing",
+            if (!current) {
 
-                                paymentStatus:
-                                    "PROCESSING",
+                console.warn(
+                    "[MPESA CLAIM] ABORT: RECORD DOES NOT EXIST:",
+                    withdrawalId
+                );
 
-                                processingAt:
-                                    now,
+                return;
+            }
 
-                                paymentAttemptedAt:
-                                    now,
+            const currentStatus =
+                normalizeStatus(
+                    current.status
+                );
 
-                                paymentFailureReason:
-                                    "",
-
-                                reconciliationRequired:
-                                    false,
-
-                                reconciliationAt:
-                                    null,
-
-                                updatedAt:
-                                    now
-                            };
-                        }
-                    );
-
+            console.log(
+                "[MPESA CLAIM] NORMALIZED STATUS:",
+                {
+                    withdrawalId,
+                    currentStatus
+                }
+            );
 
             if (
-                !mpesaClaimResult.committed
+                currentStatus !==
+                    "APPROVED" &&
+                currentStatus !==
+                    "PAYMENT_FAILED"
             ) {
 
-                const latestSnapshot =
-                    await withdrawalRef.get();
+                console.warn(
+                    "[MPESA CLAIM] ABORT: STATUS NOT CLAIMABLE:",
+                    {
+                        withdrawalId,
+                        currentStatus
+                    }
+                );
 
-                const latest =
-                    latestSnapshot.exists()
-                        ? latestSnapshot.val()
-                        : null;
-
-                const latestStatus =
-                    normalizeStatus(
-                        latest?.status
-                    );
-
-                return res.status(409).json({
-
-                    success: false,
-
-                    message:
-                        latestStatus ===
-                        "PROCESSING"
-
-                            ? "This withdrawal is already being processed."
-
-                            : latestStatus ===
-                            "PAID"
-
-                                ? "This withdrawal has already been paid."
-
-                                : latestStatus ===
-                                "RECONCILIATION_REQUIRED"
-
-                                    ? "This withdrawal requires reconciliation before another payment attempt."
-
-                                    : "Withdrawal cannot be paid in its current state.",
-
-                    status:
-                        latest?.status || ""
-                });
+                return;
             }
+
+            const now =
+                Date.now();
+
+            console.log(
+                "[MPESA CLAIM] CLAIMING:",
+                {
+                    withdrawalId,
+                    previousStatus:
+                        currentStatus,
+                    newStatus:
+                        "processing"
+                }
+            );
+
+            return {
+
+                ...current,
+
+                status:
+                    "processing",
+
+                paymentStatus:
+                    "PROCESSING",
+
+                processingAt:
+                    now,
+
+                paymentAttemptedAt:
+                    now,
+
+                paymentFailureReason:
+                    "",
+
+                reconciliationRequired:
+                    false,
+
+                reconciliationAt:
+                    null,
+
+                updatedAt:
+                    now
+            };
+        }
+    );
+
+
+console.log(
+    "[MPESA CLAIM] RESULT:",
+    {
+        withdrawalId,
+
+        committed:
+            mpesaClaimResult.committed,
+
+        snapshotExists:
+            mpesaClaimResult.snapshot.exists(),
+
+        snapshotStatus:
+            mpesaClaimResult.snapshot.val()?.status || "",
+
+        snapshotPaymentStatus:
+            mpesaClaimResult.snapshot.val()?.paymentStatus || ""
+    }
+);
 
 
             const claimedMpesaSnapshot =
