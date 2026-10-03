@@ -4049,21 +4049,25 @@ const mpesaClaimResult =
 
 console.log(
     "[MPESA CLAIM] RESULT:",
-    {
-        withdrawalId,
+    JSON.stringify(
+        {
+            withdrawalId,
 
-        committed:
-            mpesaClaimResult.committed,
+            committed:
+                mpesaClaimResult.committed,
 
-        snapshotExists:
-            mpesaClaimResult.snapshot.exists(),
+            snapshotExists:
+                mpesaClaimResult.snapshot.exists(),
 
-        snapshotStatus:
-            mpesaClaimResult.snapshot.val()?.status || "",
+            snapshotStatus:
+                mpesaClaimResult.snapshot.val()?.status || "",
 
-        snapshotPaymentStatus:
-            mpesaClaimResult.snapshot.val()?.paymentStatus || ""
-    }
+            snapshotPaymentStatus:
+                mpesaClaimResult.snapshot.val()?.paymentStatus || ""
+        },
+        null,
+        2
+    )
 );
 /*
 ==========================================
@@ -4107,15 +4111,21 @@ if (
             latest?.status
         );
 
-    console.warn(
-        "[MPESA CLAIM] LATEST FIREBASE STATE:",
+    console.log(
+    "[MPESA CLAIM] LATEST FIREBASE STATE:",
+    JSON.stringify(
         {
             withdrawalId,
             latestStatus,
             paymentStatus:
-                latest?.paymentStatus || ""
-        }
-    );
+                latest?.paymentStatus || "",
+            exists:
+                latestSnapshot.exists()
+        },
+        null,
+        2
+    )
+);
 
     return res.status(409).json({
 
