@@ -3,7 +3,7 @@ const { db } = require("../firebase");
 const ActivityManager =
     require("../activity/ActivityManager");
 
-const MIN_WITHDRAWAL = 200;
+const MIN_WITHDRAWAL = 10;
 const MAX_WITHDRAWAL = 50000;
 
 const LedgerManager =
