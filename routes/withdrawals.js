@@ -2071,6 +2071,87 @@ processing
 new PayPal attempt
 ====================================================
 */
+/*
+====================================================
+PAY WITHDRAWAL
+====================================================
+
+PAYPAL:
+
+approved
+    ↓
+atomic claim
+    ↓
+processing
+    ↓
+submit to PayPal
+    ↓
+processing
+    ↓
+status reconciliation
+
+SUCCESS
+    ↓
+paid
+
+CONFIRMED FAILURE
+    ↓
+payment_failed
+    ↓
+wallet restored
+
+UNKNOWN
+    ↓
+reconciliation_required
+    ↓
+funds remain reserved
+
+RETRY AFTER CONFIRMED FAILURE:
+
+payment_failed
+    ↓
+atomic claim
+    ↓
+NEW sender batch identity
+    ↓
+processing
+    ↓
+new PayPal attempt
+
+
+M-PESA:
+
+approved
+    ↓
+atomic claim
+    ↓
+processing
+    ↓
+submit B2C
+    ↓
+provider response
+
+CONFIRMED FAILURE
+    ↓
+payment_failed
+    ↓
+wallet restored
+
+UNKNOWN / TIMEOUT / EXCEPTION
+    ↓
+reconciliation_required
+    ↓
+funds remain reserved
+
+SUCCESS / ACCEPTED
+    ↓
+processing
+    ↓
+callback / reconciliation
+    ↓
+paid
+====================================================
+*/
 
 router.post(
     "/:withdrawalId/pay",
@@ -2136,64 +2217,63 @@ router.post(
                 );
 
 
-            
-/*
-==========================================
-VALIDATE STATUS
-==========================================
-*/
+            /*
+            ==========================================
+            VALIDATE STATUS
+            ==========================================
+            */
 
-const reconciliationRequired =
-    initialStatus === "RECONCILIATION_REQUIRED";
+            const reconciliationRequired =
+                initialStatus ===
+                "RECONCILIATION_REQUIRED";
 
 
-if (
-    initialStatus !== "APPROVED" &&
-    initialStatus !== "PAYMENT_FAILED" &&
-    !reconciliationRequired
-) {
+            if (
+                initialStatus !== "APPROVED" &&
+                initialStatus !== "PAYMENT_FAILED" &&
+                !reconciliationRequired
+            ) {
 
-    let message =
-        "Withdrawal must be approved before payment.";
+                let message =
+                    "Withdrawal must be approved before payment.";
 
-    if (
-        initialStatus ===
-        "PROCESSING"
-    ) {
+                if (
+                    initialStatus ===
+                    "PROCESSING"
+                ) {
 
-        message =
-            "This withdrawal is already being processed.";
-    }
+                    message =
+                        "This withdrawal is already being processed.";
+                }
 
-    if (
-        initialStatus ===
-        "PAID"
-    ) {
+                if (
+                    initialStatus ===
+                    "PAID"
+                ) {
 
-        message =
-            "This withdrawal has already been paid.";
-    }
+                    message =
+                        "This withdrawal has already been paid.";
+                }
 
-    if (
-        initialStatus ===
-        "REJECTED"
-    ) {
+                if (
+                    initialStatus ===
+                    "REJECTED"
+                ) {
 
-        message =
-            "This withdrawal has been rejected.";
-    }
+                    message =
+                        "This withdrawal has been rejected.";
+                }
 
-    return res.status(400).json({
+                return res.status(400).json({
 
-        success: false,
+                    success: false,
 
-        message,
+                    message,
 
-        status:
-            withdrawal.status
-    });
-}
-
+                    status:
+                        withdrawal.status
+                });
+            }
 
 
             /*
@@ -2226,228 +2306,237 @@ if (
                 ======================================
                 ATOMIC CLAIM
                 ======================================
-
-                Only one request can claim the
-                withdrawal.
-
-                APPROVED and PAYMENT_FAILED are both
-                claimable.
                 */
 
-               console.log(
-    "[PAYPAL] BEFORE CLAIM:",
-    {
-        withdrawalId,
-        initialStatus,
-        firebaseStatus: withdrawal.status,
-        paymentStatus: withdrawal.paymentStatus
-    }
-);
-
-
-/*
-==================================================
-REFRESH FIREBASE STATE BEFORE TRANSACTION
-==================================================
-*/
-
-const claimPreflightSnapshot =
-    await withdrawalRef.get();
-
-if (!claimPreflightSnapshot.exists()) {
-
-    console.error(
-        "[PAYPAL] CLAIM PREFLIGHT FAILED:",
-        {
-            withdrawalId
-        }
-    );
-
-    return res.status(404).json({
-        success: false,
-        message:
-            "Withdrawal request no longer exists."
-    });
-}
-
-const claimPreflight =
-    claimPreflightSnapshot.val();
-
-console.log(
-    "[PAYPAL] CLAIM PREFLIGHT:",
-    {
-        withdrawalId,
-        exists:
-            claimPreflightSnapshot.exists(),
-        status:
-            claimPreflight?.status || "",
-        paymentStatus:
-            claimPreflight?.paymentStatus || ""
-    }
-);
-
-let usedPreflightFallback = false;
-
-const claimResult =
-    await withdrawalRef.transaction(
-        current => {
-
-            console.log(
-                "[PAYPAL] CLAIM TRANSACTION CALLBACK:",
-                {
-                    withdrawalId,
-                    currentExists:
-                        !!current,
-                    currentStatus:
-                        current?.status || "",
-                    normalizedStatus:
-                        normalizeStatus(
-                            current?.status
-                        ),
-                    usedPreflightFallback
-                }
-            );
-
-            /*
-            ==========================================
-            FIREBASE INITIAL NULL HANDLING
-            ==========================================
-
-            Firebase may initially call the transaction
-            callback with null even though the record
-            exists remotely.
-
-            We already performed a direct GET above and
-            confirmed that this withdrawal exists.
-
-            Use that verified value for the initial
-            callback. Firebase will still perform its
-            transaction conflict check.
-            */
-
-            if (
-                current == null &&
-                !usedPreflightFallback
-            ) {
-
-                usedPreflightFallback =
-                    true;
-
                 console.log(
-                    "[PAYPAL] TRANSACTION INITIAL NULL - USING PREFLIGHT:",
+                    "[PAYPAL] BEFORE CLAIM:",
                     {
-                        withdrawalId
+                        withdrawalId,
+                        initialStatus,
+                        firebaseStatus:
+                            withdrawal.status,
+                        paymentStatus:
+                            withdrawal.paymentStatus
                     }
                 );
 
-                current =
-                    claimPreflight;
-            }
 
-            /*
-            ==========================================
-            REAL MISSING RECORD
-            ==========================================
-            */
+                /*
+                ======================================
+                REFRESH FIREBASE STATE BEFORE
+                TRANSACTION
+                ======================================
+                */
 
-            if (!current) {
+                const claimPreflightSnapshot =
+                    await withdrawalRef.get();
 
-                console.warn(
-                    "[PAYPAL] CLAIM ABORTED: RECORD DOES NOT EXIST",
-                    withdrawalId
-                );
+                if (
+                    !claimPreflightSnapshot.exists()
+                ) {
 
-                return;
-            }
+                    console.error(
+                        "[PAYPAL] CLAIM PREFLIGHT FAILED:",
+                        {
+                            withdrawalId
+                        }
+                    );
 
-            const currentStatus =
-                normalizeStatus(
-                    current.status
-                );
+                    return res.status(404).json({
 
-           
-/*
-==========================================
-CLAIMABLE STATUS
-==========================================
-*/
+                        success: false,
 
-if (
-    currentStatus !== "APPROVED" &&
-    currentStatus !== "PAYMENT_FAILED" &&
-    currentStatus !== "RECONCILIATION_REQUIRED"
-) {
-
-    console.warn(
-        "[PAYPAL] CLAIM ABORTED: STATUS NOT CLAIMABLE:",
-        {
-            withdrawalId,
-            currentStatus
-        }
-    );
-
-    return;
-}
-
-
-
-            const now =
-                Date.now();
-
-            console.log(
-                "[PAYPAL] CLAIMING WITH STATUS:",
-                {
-                    withdrawalId,
-                    currentStatus,
-                    newStatus:
-                        "processing"
+                        message:
+                            "Withdrawal request no longer exists."
+                    });
                 }
-            );
 
-            return {
-                ...current,
+                const claimPreflight =
+                    claimPreflightSnapshot.val();
 
-                status:
-                    "processing",
+                console.log(
+                    "[PAYPAL] CLAIM PREFLIGHT:",
+                    {
+                        withdrawalId,
+                        exists:
+                            claimPreflightSnapshot.exists(),
+                        status:
+                            claimPreflight?.status || "",
+                        paymentStatus:
+                            claimPreflight?.paymentStatus || ""
+                    }
+                );
 
-                paymentStatus:
-                    "PROCESSING",
+                let usedPreflightFallback = false;
 
-                processingAt:
-                    now,
+                const claimResult =
+                    await withdrawalRef.transaction(
+                        current => {
 
-                paymentAttemptedAt:
-                    now,
+                            console.log(
+                                "[PAYPAL] CLAIM TRANSACTION CALLBACK:",
+                                {
+                                    withdrawalId,
 
-                paymentFailureReason:
-                    "",
+                                    currentExists:
+                                        !!current,
 
-                reconciliationRequired:
-                    false,
+                                    currentStatus:
+                                        current?.status || "",
 
-                reconciliationAt:
-                    null,
+                                    normalizedStatus:
+                                        normalizeStatus(
+                                            current?.status
+                                        ),
 
-                updatedAt:
-                    now
-            };
-        }
-    );
+                                    usedPreflightFallback
+                                }
+                            );
 
-console.log(
-    "[PAYPAL] CLAIM RESULT:",
-    {
-        withdrawalId,
-        committed:
-            claimResult.committed,
-        snapshotExists:
-            claimResult.snapshot.exists(),
-        snapshotStatus:
-            claimResult.snapshot.val()?.status || "",
-        snapshotPaymentStatus:
-            claimResult.snapshot.val()?.paymentStatus || ""
-    }
-);
+
+                            /*
+                            ==================================
+                            FIREBASE INITIAL NULL HANDLING
+                            ==================================
+                            */
+
+                            if (
+                                current == null &&
+                                !usedPreflightFallback
+                            ) {
+
+                                usedPreflightFallback =
+                                    true;
+
+                                console.log(
+                                    "[PAYPAL] TRANSACTION INITIAL NULL - USING PREFLIGHT:",
+                                    {
+                                        withdrawalId
+                                    }
+                                );
+
+                                current =
+                                    claimPreflight;
+                            }
+
+
+                            /*
+                            ==================================
+                            REAL MISSING RECORD
+                            ==================================
+                            */
+
+                            if (!current) {
+
+                                console.warn(
+                                    "[PAYPAL] CLAIM ABORTED: RECORD DOES NOT EXIST",
+                                    withdrawalId
+                                );
+
+                                return;
+                            }
+
+                            const currentStatus =
+                                normalizeStatus(
+                                    current.status
+                                );
+
+
+                            /*
+                            ==================================
+                            CLAIMABLE STATUS
+                            ==================================
+                            */
+
+                            if (
+                                currentStatus !==
+                                    "APPROVED" &&
+                                currentStatus !==
+                                    "PAYMENT_FAILED" &&
+                                currentStatus !==
+                                    "RECONCILIATION_REQUIRED"
+                            ) {
+
+                                console.warn(
+                                    "[PAYPAL] CLAIM ABORTED: STATUS NOT CLAIMABLE:",
+                                    {
+                                        withdrawalId,
+                                        currentStatus
+                                    }
+                                );
+
+                                return;
+                            }
+
+                            const now =
+                                Date.now();
+
+                            console.log(
+                                "[PAYPAL] CLAIMING WITH STATUS:",
+                                {
+                                    withdrawalId,
+                                    currentStatus,
+                                    newStatus:
+                                        "processing"
+                                }
+                            );
+
+                            return {
+
+                                ...current,
+
+                                status:
+                                    "processing",
+
+                                paymentStatus:
+                                    "PROCESSING",
+
+                                processingAt:
+                                    now,
+
+                                paymentAttemptedAt:
+                                    now,
+
+                                paymentFailureReason:
+                                    "",
+
+                                reconciliationRequired:
+                                    false,
+
+                                reconciliationAt:
+                                    null,
+
+                                updatedAt:
+                                    now
+                            };
+                        }
+                    );
+
+
+                console.log(
+                    "[PAYPAL] CLAIM RESULT:",
+                    JSON.stringify(
+                        {
+                            withdrawalId,
+
+                            committed:
+                                claimResult.committed,
+
+                            snapshotExists:
+                                claimResult.snapshot.exists(),
+
+                            snapshotStatus:
+                                claimResult.snapshot.val()?.status ||
+                                "",
+
+                            snapshotPaymentStatus:
+                                claimResult.snapshot.val()?.paymentStatus ||
+                                ""
+                        },
+                        null,
+                        2
+                    )
+                );
 
 
                 /*
@@ -2502,9 +2591,9 @@ console.log(
                     }
                     else if (
                         latestStatus ===
-                        "APPROVED" ||
+                            "APPROVED" ||
                         latestStatus ===
-                        "PAYMENT_FAILED"
+                            "PAYMENT_FAILED"
                     ) {
 
                         message =
@@ -2559,12 +2648,6 @@ console.log(
                 ======================================
                 CONFIRMED FAILURE RETRY
                 ======================================
-
-                A payment_failed withdrawal gets a
-                NEW sender batch identity.
-
-                This is the ONLY place a normal retry
-                identity is generated during /pay.
                 */
 
                 if (
@@ -2576,9 +2659,11 @@ console.log(
                         "[PAYPAL] CONFIRMED FAILURE RETRY DETECTED:",
                         {
                             withdrawalId,
+
                             oldSenderBatchId:
                                 withdrawal.paypalSenderBatchId ||
                                 "",
+
                             oldAttemptNumber:
                                 withdrawal.paypalAttemptNumber ||
                                 0
@@ -2679,267 +2764,133 @@ console.log(
                             );
 
                 }
-                
-catch (paypalError) {
+                catch (paypalError) {
 
-    console.error(
-        "[PAYPAL SEND ERROR]",
-        {
-            withdrawalId,
+                    console.error(
+                        "[PAYPAL SEND ERROR]",
+                        {
+                            withdrawalId,
 
-            message:
-                getSafeErrorMessage(
-                    paypalError
-                ),
+                            message:
+                                getSafeErrorMessage(
+                                    paypalError
+                                ),
 
-            code:
-                paypalError?.code ||
-                "",
+                            code:
+                                paypalError?.code ||
+                                "",
 
-            httpStatus:
-                paypalError?.response?.status ||
-                "",
+                            httpStatus:
+                                paypalError?.response?.status ||
+                                "",
 
-            unknownOutcome:
-                paypalError?.unknownOutcome === true,
+                            unknownOutcome:
+                                paypalError?.unknownOutcome ===
+                                true,
 
-            reconciliationRequired:
-                paypalError?.reconciliationRequired === true,
+                            reconciliationRequired:
+                                paypalError?.reconciliationRequired ===
+                                true,
 
-            confirmedFailure:
-                paypalError?.confirmedFailure === true
-        }
-    );
+                            confirmedFailure:
+                                paypalError?.confirmedFailure ===
+                                true
+                        }
+                    );
 
-    /*
-    ============================================================
-    PAYPAL ERROR CLASSIFICATION
-    ============================================================
 
-    We must NOT assume that every thrown PayPal error means
-    the payout definitely failed.
+                    const isConfirmedFailure =
+                        paypalError?.confirmedFailure ===
+                        true;
 
-    There are three possible cases:
+                    const isUnknownOutcome =
+                        paypalError?.unknownOutcome ===
+                            true ||
+                        paypalError?.reconciliationRequired ===
+                            true;
 
-    1. CONFIRMED FAILURE
-       We know the payout could not have succeeded.
 
-       Example:
-       - Invalid PayPal credentials
-       - Invalid request rejected before submission
-       - Known provider validation failure
+                    /*
+                    ==================================
+                    CONFIRMED FAILURE
+                    ==================================
+                    */
 
-       These can safely become PAYMENT_FAILED.
+                    if (
+                        isConfirmedFailure &&
+                        !isUnknownOutcome
+                    ) {
 
-    2. UNKNOWN OUTCOME
-       PayPal may have received the payout request, but we
-       cannot establish the final result.
+                        await withdrawalManager
+                            .markPaymentFailed(
+                                withdrawalId,
 
-       These MUST go to reconciliation.
+                                getSafeErrorMessage(
+                                    paypalError
+                                )
+                            );
 
-    3. UNCLASSIFIED ERROR
-       We do not have enough information to determine what
-       happened.
+                        return res.status(400).json({
 
-       These also go to reconciliation for safety.
+                            success: false,
 
-    IMPORTANT:
-    Only an error explicitly marked confirmedFailure=true
-    is automatically treated as a confirmed payment failure.
-    ============================================================
-    */
+                            paymentFailed:
+                                true,
 
-    const isConfirmedFailure =
-        paypalError?.confirmedFailure === true;
+                            processing:
+                                false,
 
-    const isUnknownOutcome =
-        paypalError?.unknownOutcome === true ||
-        paypalError?.reconciliationRequired === true;
+                            reconciliationRequired:
+                                false,
 
+                            message:
+                                "PayPal payment could not be submitted. The withdrawal was marked payment_failed and wallet funds were restored.",
 
-    /*
-    ============================================================
-    1. CONFIRMED PAYMENT FAILURE
-    ============================================================
-    */
+                            withdrawalId
+                        });
+                    }
 
-    if (
-        isConfirmedFailure &&
-        !isUnknownOutcome
-    ) {
 
-        console.log(
-            "[PAYPAL] CONFIRMED PRE-SUBMISSION FAILURE:",
-            {
-                withdrawalId,
+                    /*
+                    ==================================
+                    UNKNOWN OUTCOME
+                    ==================================
+                    */
 
-                code:
-                    paypalError?.code ||
-                    "",
+                    await markPayPalReconciliationRequired(
+                        withdrawalId,
 
-                httpStatus:
-                    paypalError?.response?.status ||
-                    ""
-            }
-        );
+                        getSafeErrorMessage(
+                            paypalError
+                        )
+                    );
 
-        /*
-        Mark the withdrawal as payment_failed.
+                    return res.status(202).json({
 
-        WithdrawalManager is responsible for the existing
-        wallet restoration / ledger reversal logic.
-        */
+                        success: false,
 
-        await withdrawalManager
-            .markPaymentFailed(
-                withdrawalId,
-                getSafeErrorMessage(
-                    paypalError
-                )
-            );
+                        paymentFailed:
+                            false,
 
-        return res.status(400).json({
+                        processing:
+                            false,
 
-            success: false,
+                        reconciliationRequired:
+                            true,
 
-            paymentFailed: true,
+                        message:
+                            "PayPal payout outcome is uncertain. The withdrawal has been placed into reconciliation.",
 
-            processing: false,
+                        withdrawalId
+                    });
+                }
 
-            reconciliationRequired: false,
 
-            message:
-                "PayPal payment could not be submitted. The withdrawal was marked payment_failed and wallet funds were restored.",
-
-            withdrawalId
-        });
-    }
-
-
-    /*
-    ============================================================
-    2. UNKNOWN PAYPAL OUTCOME
-    ============================================================
-    */
-
-    if (
-        isUnknownOutcome
-    ) {
-
-        console.warn(
-            "[PAYPAL] UNKNOWN OUTCOME - RECONCILIATION REQUIRED:",
-            {
-                withdrawalId,
-
-                code:
-                    paypalError?.code ||
-                    "",
-
-                httpStatus:
-                    paypalError?.response?.status ||
-                    ""
-            }
-        );
-
-        /*
-        DO NOT restore wallet funds here.
-
-        The payout may already exist at PayPal.
-
-        Reconciliation must determine the actual provider
-        result before the wallet can safely be released.
-        */
-
-        await markPayPalReconciliationRequired(
-            withdrawalId,
-            getSafeErrorMessage(
-                paypalError
-            )
-        );
-
-        return res.status(202).json({
-
-            success: false,
-
-            paymentFailed: false,
-
-            processing: false,
-
-            reconciliationRequired: true,
-
-            message:
-                "PayPal payout outcome is uncertain. The withdrawal has been placed into reconciliation.",
-
-            withdrawalId
-        });
-    }
-
-
-    /*
-    ============================================================
-    3. UNCLASSIFIED ERROR
-    ============================================================
-
-    If PayPal's error does not explicitly tell us that the
-    payment definitely failed, we must assume the outcome
-    could be uncertain.
-
-    Therefore:
-
-        DO NOT restore wallet funds.
-        DO NOT mark PAYMENT_FAILED.
-        DO NOT allow another payout submission.
-
-    Instead place the withdrawal into reconciliation.
-    ============================================================
-    */
-
-    console.warn(
-        "[PAYPAL] UNCLASSIFIED ERROR - RECONCILIATION REQUIRED:",
-        {
-            withdrawalId,
-
-            code:
-                paypalError?.code ||
-                "",
-
-            httpStatus:
-                paypalError?.response?.status ||
-                "",
-
-            message:
-                getSafeErrorMessage(
-                    paypalError
-                )
-        }
-    );
-
-    await markPayPalReconciliationRequired(
-        withdrawalId,
-        getSafeErrorMessage(
-            paypalError
-        )
-    );
-
-    return res.status(202).json({
-
-        success: false,
-
-        paymentFailed: false,
-
-        processing: false,
-
-        reconciliationRequired: true,
-
-        message:
-            "PayPal payment outcome could not be established. The withdrawal remains reserved for reconciliation.",
-
-        withdrawalId
-    });
-}
-
-
-
+                /*
+                ======================================
+                PAYPAL PROVIDER RESPONSE
+                ======================================
+                */
 
                 console.log(
                     "[PAYPAL] PROVIDER RESPONSE:",
@@ -2980,11 +2931,6 @@ catch (paypalError) {
                     }
                 );
 
-                        /*
-                ======================================
-                PAYPAL PROVIDER RESPONSE
-                ======================================
-                */
 
                 const providerStatus =
                     normalizeStatus(
@@ -3022,13 +2968,8 @@ catch (paypalError) {
 
                 /*
                 ======================================
-                1. UNKNOWN / RECONCILIATION
+                UNKNOWN / RECONCILIATION
                 ======================================
-
-                Unknown outcome always wins over failure.
-
-                Never restore wallet funds when PayPal's
-                final outcome cannot be established.
                 */
 
                 if (
@@ -3046,8 +2987,7 @@ catch (paypalError) {
 
                     return res.status(202).json({
 
-                        success:
-                            false,
+                        success: false,
 
                         reconciliationRequired:
                             true,
@@ -3066,14 +3006,17 @@ catch (paypalError) {
 
                 /*
                 ======================================
-                2. EXPLICIT RECONCILIATION STATES
+                EXPLICIT RECONCILIATION
                 ======================================
                 */
 
                 if (
-                    payment?.reconciliationRequired === true ||
-                    payment?.unknownOutcome === true ||
-                    payment?.uncertain === true ||
+                    payment?.reconciliationRequired ===
+                        true ||
+                    payment?.unknownOutcome ===
+                        true ||
+                    payment?.uncertain ===
+                        true ||
                     isPayPalReconciliationStatus(
                         providerBatchStatus,
                         providerTransactionStatus
@@ -3093,8 +3036,7 @@ catch (paypalError) {
 
                     return res.status(202).json({
 
-                        success:
-                            false,
+                        success: false,
 
                         reconciliationRequired:
                             true,
@@ -3113,15 +3055,8 @@ catch (paypalError) {
 
                 /*
                 ======================================
-                3. CONFIRMED ITEM-LEVEL SUCCESS
+                CONFIRMED ITEM SUCCESS
                 ======================================
-
-                IMPORTANT:
-
-                PayPal batch SUCCESS alone is NOT enough.
-
-                The specific payout item must report
-                transaction_status === SUCCESS.
                 */
 
                 const confirmedProviderSuccess =
@@ -3132,11 +3067,6 @@ catch (paypalError) {
                 if (
                     confirmedProviderSuccess
                 ) {
-
-                    /*
-                        A successful PayPal result without
-                        a batch ID cannot be safely synchronized.
-                    */
 
                     if (
                         !providerBatchId
@@ -3150,8 +3080,7 @@ catch (paypalError) {
 
                         return res.status(202).json({
 
-                            success:
-                                false,
+                            success: false,
 
                             reconciliationRequired:
                                 true,
@@ -3161,12 +3090,6 @@ catch (paypalError) {
                         });
                     }
 
-
-                    /*
-                    ==================================
-                    RELOAD LOCAL STATE
-                    ==================================
-                    */
 
                     const currentSnapshot =
                         await withdrawalRef.get();
@@ -3182,12 +3105,6 @@ catch (paypalError) {
                         );
 
 
-                    /*
-                    ==================================
-                    NEVER AUTO-CONVERT RECONCILIATION
-                    ==================================
-                    */
-
                     if (
                         currentStatus ===
                         "RECONCILIATION_REQUIRED"
@@ -3195,8 +3112,7 @@ catch (paypalError) {
 
                         return res.status(409).json({
 
-                            success:
-                                false,
+                            success: false,
 
                             reconciliationRequired:
                                 true,
@@ -3206,16 +3122,6 @@ catch (paypalError) {
                         });
                     }
 
-
-                    /*
-                    ==================================
-                    SUCCESS AFTER LOCAL RESTORATION
-                    ==================================
-
-                    This is a conflict.
-
-                    Do NOT restore again.
-                    */
 
                     if (
                         currentStatus ===
@@ -3230,8 +3136,7 @@ catch (paypalError) {
 
                         return res.status(409).json({
 
-                            success:
-                                false,
+                            success: false,
 
                             reconciliationRequired:
                                 true,
@@ -3241,12 +3146,6 @@ catch (paypalError) {
                         });
                     }
 
-
-                    /*
-                    ==================================
-                    MARK PAID
-                    ==================================
-                    */
 
                     await withdrawalManager
                         .markAsPaid(
@@ -3349,324 +3248,183 @@ catch (paypalError) {
                 }
 
 
-             
-
                 /*
-======================================
-4. CONFIRMED FAILURE
-======================================
+                ======================================
+                CONFIRMED FAILURE
+                ======================================
+                */
 
-A payment manager result can explicitly tell us
-that the payment failed before a payout could
-have been successfully submitted.
+                const managerConfirmedFailure =
+                    payment?.confirmedFailure ===
+                    true;
 
-This is important for failures such as:
+                const providerConfirmedFailure =
+                    isPayPalFailure(
+                        providerBatchStatus,
+                        providerTransactionStatus
+                    );
 
-    - PayPal OAuth 401
-    - Invalid PayPal credentials
-    - Missing PayPal credentials
-    - Other confirmed pre-submission failures
+                const confirmedPayPalFailure =
+                    managerConfirmedFailure ||
+                    providerConfirmedFailure;
 
-Provider-level FAILED / DENIED / CANCELED
-statuses are also treated as confirmed failures.
-*/
 
-const managerConfirmedFailure =
-    payment?.confirmedFailure === true;
+                if (
+                    confirmedPayPalFailure
+                ) {
 
-const providerConfirmedFailure =
-    isPayPalFailure(
-        providerBatchStatus,
-        providerTransactionStatus
-    );
+                    const currentSnapshot =
+                        await withdrawalRef.get();
 
-const confirmedPayPalFailure =
-    managerConfirmedFailure ||
-    providerConfirmedFailure;
+                    const current =
+                        currentSnapshot.exists
+                            ? currentSnapshot.val()
+                            : null;
 
-if (
-    confirmedPayPalFailure
-) {
+                    const currentStatus =
+                        normalizeStatus(
+                            current?.status
+                        );
 
-    console.log(
-        "[PAYPAL] CONFIRMED FAILURE:",
-        {
-            withdrawalId,
 
-            managerConfirmedFailure,
+                    if (
+                        currentStatus ===
+                        "PAID"
+                    ) {
 
-            providerConfirmedFailure,
+                        return res.status(409).json({
 
-            paymentStatus:
-                payment?.status ||
-                "",
+                            success:
+                                false,
 
-            paymentFailureReason:
-                payment?.message ||
-                payment?.paymentFailureReason ||
-                "",
+                            paymentFailed:
+                                false,
 
-            batchStatus:
-                providerBatchStatus,
+                            reconciliationRequired:
+                                true,
 
-            transactionStatus:
-                providerTransactionStatus
-        }
-    );
+                            message:
+                                "PayPal reported a failure, but the local withdrawal is already paid. No wallet rollback was performed.",
 
+                            withdrawalId
+                        });
+                    }
 
-    /*
-    ======================================
-    NEVER MOVE PAID BACKWARDS
-    ======================================
-    */
 
-    const currentSnapshot =
-        await withdrawalRef.get();
+                    if (
+                        currentStatus ===
+                        "RECONCILIATION_REQUIRED"
+                    ) {
 
-    const current =
-        currentSnapshot.exists()
-            ? currentSnapshot.val()
-            : null;
+                        return res.status(409).json({
 
-    const currentStatus =
-        normalizeStatus(
-            current?.status
-        );
+                            success:
+                                false,
 
-    if (
-        currentStatus ===
-        "PAID"
-    ) {
-
-        console.warn(
-            "[PAYPAL] FAILURE REPORTED AFTER LOCAL PAYMENT:",
-            {
-                withdrawalId
-            }
-        );
+                            paymentFailed:
+                                false,
 
-        return res.status(409).json({
+                            reconciliationRequired:
+                                true,
 
-            success:
-                false,
+                            message:
+                                "PayPal reported a failure, but this withdrawal is already in reconciliation. Manual reconciliation is required.",
 
-            paymentFailed:
-                false,
+                            withdrawalId
+                        });
+                    }
 
-            reconciliationRequired:
-                true,
 
-            message:
-                "PayPal reported a failure, but the local withdrawal is already paid. No wallet rollback was performed.",
+                    const failureReason =
+                        payment?.message ||
+                        payment?.paymentFailureReason ||
+                        (
+                            providerTransactionStatus
+                                ? `PayPal payout transaction status: ${providerTransactionStatus}`
+                                : providerBatchStatus
+                                    ? `PayPal payout batch status: ${providerBatchStatus}`
+                                    : "PayPal payout failed before submission."
+                        );
 
-            withdrawalId
-        });
-    }
 
+                    await withdrawalManager
+                        .markPaymentFailed(
+                            withdrawalId,
+                            failureReason
+                        );
 
-    /*
-    ======================================
-    NEVER AUTO-ROLLBACK RECONCILIATION
-    ======================================
-    */
 
-    if (
-        currentStatus ===
-        "RECONCILIATION_REQUIRED"
-    ) {
+                    await withdrawalRef.update({
 
-        console.warn(
-            "[PAYPAL] FAILURE REPORTED FOR RECONCILIATION WITHDRAWAL:",
-            {
-                withdrawalId
-            }
-        );
+                        status:
+                            "payment_failed",
 
-        return res.status(409).json({
+                        paymentStatus:
+                            "FAILED",
 
-            success:
-                false,
+                        paymentFailureReason:
+                            failureReason,
 
-            paymentFailed:
-                false,
+                        reconciliationRequired:
+                            false,
 
-            reconciliationRequired:
-                true,
+                        reconciliationAt:
+                            null,
 
-            message:
-                "PayPal reported a failure, but this withdrawal is already in reconciliation. Manual reconciliation is required.",
+                        paypalBatchId:
+                            providerBatchId ||
+                            withdrawal.paypalBatchId ||
+                            "",
 
-            withdrawalId
-        });
-    }
+                        paypalItemId:
+                            providerItemId ||
+                            withdrawal.paypalItemId ||
+                            "",
 
+                        paypalTransactionId:
+                            providerTransactionId ||
+                            withdrawal.paypalTransactionId ||
+                            "",
 
-    /*
-    ======================================
-    DETERMINE FAILURE REASON
-    ======================================
-    */
+                        paypalBatchStatus:
+                            providerBatchStatus ||
+                            "",
 
-    const failureReason =
-        payment?.message ||
-        payment?.paymentFailureReason ||
-        (
-            providerTransactionStatus
-                ? `PayPal payout transaction status: ${providerTransactionStatus}`
-                : providerBatchStatus
-                    ? `PayPal payout batch status: ${providerBatchStatus}`
-                    : "PayPal payout failed before submission."
-        );
+                        paypalTransactionStatus:
+                            providerTransactionStatus ||
+                            "",
 
+                        updatedAt:
+                            Date.now()
+                    });
 
-    /*
-    ======================================
-    MARK PAYMENT FAILED
-    ======================================
-    */
 
-    await withdrawalManager
-        .markPaymentFailed(
-            withdrawalId,
-            failureReason
-        );
+                    return res.status(400).json({
 
+                        success:
+                            false,
 
-    /*
-    ======================================
-    RECORD PAYPAL FAILURE STATE
-    ======================================
-    */
+                        paymentFailed:
+                            true,
 
-    await withdrawalRef.update({
+                        processing:
+                            false,
 
-        status:
-            "payment_failed",
+                        reconciliationRequired:
+                            false,
 
-        paymentStatus:
-            "FAILED",
+                        message:
+                            "PayPal confirmed that the payout failed. The withdrawal was marked payment_failed and wallet funds were restored.",
 
-        paymentFailureReason:
-            failureReason,
-
-        reconciliationRequired:
-            false,
-
-        reconciliationAt:
-            null,
-
-        paypalBatchId:
-            providerBatchId ||
-            withdrawal.paypalBatchId ||
-            "",
-
-        paypalItemId:
-            providerItemId ||
-            withdrawal.paypalItemId ||
-            "",
-
-        paypalTransactionId:
-            providerTransactionId ||
-            withdrawal.paypalTransactionId ||
-            "",
-
-        paypalBatchStatus:
-            providerBatchStatus ||
-            "",
-
-        paypalTransactionStatus:
-            providerTransactionStatus ||
-            "",
-
-        updatedAt:
-            Date.now()
-    });
-
-
-    console.log(
-        "[PAYPAL] WITHDRAWAL MARKED PAYMENT_FAILED:",
-        {
-            withdrawalId,
-
-            reason:
-                failureReason,
-
-            managerConfirmedFailure,
-
-            providerConfirmedFailure
-        }
-    );
-
-
-    return res.status(400).json({
-
-        success:
-            false,
-
-        paymentFailed:
-            true,
-
-        processing:
-            false,
-
-        reconciliationRequired:
-            false,
-
-        message:
-            "PayPal confirmed that the payout failed. The withdrawal was marked payment_failed and wallet funds were restored.",
-
-        withdrawalId,
-
-        payment: {
-
-            provider:
-                "PAYPAL",
-
-            status:
-                "FAILED",
-
-            paypalBatchId:
-                providerBatchId,
-
-            paypalItemId:
-                providerItemId,
-
-            paypalTransactionId:
-                providerTransactionId,
-
-            paypalBatchStatus:
-                providerBatchStatus,
-
-            paypalTransactionStatus:
-                providerTransactionStatus,
-
-            confirmedFailure:
-                true
-        }
-    });
-}
+                        withdrawalId
+                    });
+                }
 
 
                 /*
                 ======================================
-                5. PROCESSING
+                PAYPAL PROCESSING
                 ======================================
-
-                This includes:
-
-                    PROCESSING
-                    PENDING
-                    UNCLAIMED
-                    ONHOLD
-
-                Accepted != completed.
-
-                NEVER return success:true here.
-
-                NEVER restore wallet funds.
-
-                Keep withdrawal PROCESSING.
                 */
 
                 const paypalIsProcessing =
@@ -3735,25 +3493,6 @@ if (
                             Date.now()
                     });
 
-                    console.log(
-                        "[PAYPAL] PAYMENT STILL PROCESSING:",
-                        {
-                            withdrawalId,
-
-                            paypalBatchId:
-                                providerBatchId,
-
-                            paypalItemId:
-                                providerItemId,
-
-                            paypalBatchStatus:
-                                providerBatchStatus,
-
-                            paypalTransactionStatus:
-                                providerTransactionStatus
-                        }
-                    );
-
                     return res.status(202).json({
 
                         success:
@@ -3801,12 +3540,8 @@ if (
 
                 /*
                 ======================================
-                6. UNSUCCESSFUL / UNRESOLVED RESULT
+                PAYPAL UNRESOLVED
                 ======================================
-
-                If PayPal returned success:false but we
-                cannot prove FAILED, DENIED, or CANCELED,
-                do NOT restore funds.
                 */
 
                 if (
@@ -3843,12 +3578,8 @@ if (
 
                 /*
                 ======================================
-                7. SUCCESS RESPONSE WITHOUT ITEM SUCCESS
+                PAYPAL SUCCESS WITHOUT ITEM SUCCESS
                 ======================================
-
-                A manager-level success response that
-                does not contain recipient-level SUCCESS
-                is not enough to mark the withdrawal paid.
                 */
 
                 await markPayPalReconciliationRequired(
@@ -3909,250 +3640,569 @@ if (
 
             /*
             ==========================================
+            M-PESA ATOMIC CLAIM PREFLIGHT
+            ==========================================
+
+            IMPORTANT:
+
+            Do NOT immediately start the transaction.
+
+            First perform a fresh GET.
+
+            Firebase transactions can invoke their callback
+            with null during initial local-state resolution.
+
+            We use this verified Firebase state as the
+            transaction's initial fallback.
+
+            The transaction still performs the actual
+            atomic conflict detection.
+            ==========================================
+            */
+
+            console.log(
+                "[MPESA CLAIM] BEFORE TRANSACTION:",
+                {
+                    withdrawalId,
+
+                    initialStatus,
+
+                    firebaseStatus:
+                        withdrawal.status,
+
+                    paymentStatus:
+                        withdrawal.paymentStatus,
+
+                    paymentAttemptCount:
+                        withdrawal.paymentAttemptCount ||
+                        0
+                }
+            );
+
+
+            const mpesaClaimPreflightSnapshot =
+                await withdrawalRef.get();
+
+            if (
+                !mpesaClaimPreflightSnapshot.exists()
+            ) {
+
+                console.error(
+                    "[MPESA CLAIM] PREFLIGHT FAILED:",
+                    {
+                        withdrawalId
+                    }
+                );
+
+                return res.status(404).json({
+
+                    success: false,
+
+                    message:
+                        "Withdrawal request no longer exists."
+                });
+            }
+
+
+            const mpesaClaimPreflight =
+                mpesaClaimPreflightSnapshot.val();
+
+
+            console.log(
+                "[MPESA CLAIM] PREFLIGHT:",
+                JSON.stringify(
+                    {
+                        withdrawalId,
+
+                        exists:
+                            mpesaClaimPreflightSnapshot.exists(),
+
+                        status:
+                            mpesaClaimPreflight?.status ||
+                            "",
+
+                        normalizedStatus:
+                            normalizeStatus(
+                                mpesaClaimPreflight?.status
+                            ),
+
+                        paymentStatus:
+                            mpesaClaimPreflight?.paymentStatus ||
+                            "",
+
+                        paymentAttemptCount:
+                            mpesaClaimPreflight?.paymentAttemptCount ||
+                            0
+                    },
+                    null,
+                    2
+                )
+            );
+
+
+            /*
+            ==========================================
+            VERIFY PREFLIGHT STATUS
+            ==========================================
+            */
+
+            const preflightStatus =
+                normalizeStatus(
+                    mpesaClaimPreflight?.status
+                );
+
+
+            if (
+                preflightStatus !== "APPROVED" &&
+                preflightStatus !== "PAYMENT_FAILED"
+            ) {
+
+                console.warn(
+                    "[MPESA CLAIM] PREFLIGHT NOT CLAIMABLE:",
+                    {
+                        withdrawalId,
+                        preflightStatus
+                    }
+                );
+
+                if (
+                    preflightStatus ===
+                    "PROCESSING"
+                ) {
+
+                    return res.status(409).json({
+
+                        success: false,
+
+                        message:
+                            "This withdrawal is already being processed.",
+
+                        status:
+                            mpesaClaimPreflight?.status ||
+                            ""
+                    });
+                }
+
+                if (
+                    preflightStatus ===
+                    "PAID"
+                ) {
+
+                    return res.status(409).json({
+
+                        success: false,
+
+                        message:
+                            "This withdrawal has already been paid.",
+
+                        status:
+                            mpesaClaimPreflight?.status ||
+                            ""
+                    });
+                }
+
+                if (
+                    preflightStatus ===
+                    "RECONCILIATION_REQUIRED"
+                ) {
+
+                    return res.status(409).json({
+
+                        success: false,
+
+                        message:
+                            "This withdrawal requires reconciliation before another payment attempt.",
+
+                        status:
+                            mpesaClaimPreflight?.status ||
+                            ""
+                    });
+                }
+
+                return res.status(409).json({
+
+                    success: false,
+
+                    message:
+                        "Withdrawal payment claim could not be completed.",
+
+                    status:
+                        mpesaClaimPreflight?.status ||
+                        ""
+                });
+            }
+
+
+            /*
+            ==========================================
             ATOMIC M-PESA CLAIM
             ==========================================
             */
 
-            console.log(
-    "[MPESA CLAIM] BEFORE TRANSACTION:",
-    {
-        withdrawalId,
-        initialStatus,
-        firebaseStatus:
-            withdrawal.status,
-        paymentStatus:
-            withdrawal.paymentStatus,
-        paymentAttemptCount:
-            withdrawal.paymentAttemptCount || 0
-    }
-);
+            let usedMpesaPreflightFallback =
+                false;
 
-const mpesaClaimResult =
-    await withdrawalRef.transaction(
-        current => {
 
-            console.log(
-                "[MPESA CLAIM] TRANSACTION CURRENT:",
-                {
-                    withdrawalId,
+            const mpesaClaimResult =
+                await withdrawalRef.transaction(
+                    current => {
 
-                    currentExists:
-                        !!current,
+                        console.log(
+                            "[MPESA CLAIM] TRANSACTION CALLBACK:",
+                            JSON.stringify(
+                                {
+                                    withdrawalId,
 
-                    currentStatus:
-                        current?.status || "",
+                                    currentExists:
+                                        !!current,
 
-                    normalizedStatus:
-                        normalizeStatus(
-                            current?.status
-                        ),
+                                    currentStatus:
+                                        current?.status ||
+                                        "",
 
-                    paymentStatus:
-                        current?.paymentStatus || "",
+                                    normalizedStatus:
+                                        normalizeStatus(
+                                            current?.status
+                                        ),
 
-                    paymentAttemptCount:
-                        current?.paymentAttemptCount || 0
-                }
-            );
+                                    paymentStatus:
+                                        current?.paymentStatus ||
+                                        "",
 
-            /*
-            ==========================================
-            FIREBASE INITIAL NULL CALLBACK
-            ==========================================
-            */
+                                    paymentAttemptCount:
+                                        current?.paymentAttemptCount ||
+                                        0,
 
-            if (!current) {
+                                    usedPreflightFallback:
+                                        usedMpesaPreflightFallback
+                                },
+                                null,
+                                2
+                            )
+                        );
 
-                console.warn(
-                    "[MPESA CLAIM] INITIAL NULL CALLBACK - RETRYING:",
-                    withdrawalId
-                );
 
-                return;
-            }
+                        /*
+                        ==================================
+                        INITIAL NULL CALLBACK
+                        ==================================
 
-            const currentStatus =
-                normalizeStatus(
-                    current.status
-                );
+                        Use the freshly verified Firebase
+                        state.
 
-            console.log(
-                "[MPESA CLAIM] NORMALIZED STATUS:",
-                {
-                    withdrawalId,
-                    currentStatus
-                }
-            );
+                        IMPORTANT:
 
-            if (
-                currentStatus !==
-                    "APPROVED" &&
-                currentStatus !==
-                    "PAYMENT_FAILED"
-            ) {
+                        We do NOT perform an update outside
+                        the transaction.
 
-                console.warn(
-                    "[MPESA CLAIM] ABORT: STATUS NOT CLAIMABLE:",
-                    {
-                        withdrawalId,
-                        currentStatus
+                        Firebase still controls the final
+                        atomic commit.
+                        ==================================
+                        */
+
+                        if (
+                            current == null &&
+                            !usedMpesaPreflightFallback
+                        ) {
+
+                            usedMpesaPreflightFallback =
+                                true;
+
+                            console.log(
+                                "[MPESA CLAIM] INITIAL NULL - USING PREFLIGHT:",
+                                {
+                                    withdrawalId
+                                }
+                            );
+
+                            current =
+                                mpesaClaimPreflight;
+                        }
+
+
+                        /*
+                        ==================================
+                        REAL MISSING RECORD
+                        ==================================
+                        */
+
+                        if (!current) {
+
+                            console.warn(
+                                "[MPESA CLAIM] ABORT: RECORD DOES NOT EXIST:",
+                                withdrawalId
+                            );
+
+                            return;
+                        }
+
+
+                        const currentStatus =
+                            normalizeStatus(
+                                current.status
+                            );
+
+
+                        console.log(
+                            "[MPESA CLAIM] NORMALIZED STATUS:",
+                            {
+                                withdrawalId,
+                                currentStatus
+                            }
+                        );
+
+
+                        /*
+                        ==================================
+                        CLAIMABLE STATUS
+                        ==================================
+                        */
+
+                        if (
+                            currentStatus !==
+                                "APPROVED" &&
+                            currentStatus !==
+                                "PAYMENT_FAILED"
+                        ) {
+
+                            console.warn(
+                                "[MPESA CLAIM] ABORT: STATUS NOT CLAIMABLE:",
+                                {
+                                    withdrawalId,
+                                    currentStatus
+                                }
+                            );
+
+                            return;
+                        }
+
+
+                        const now =
+                            Date.now();
+
+
+                        const nextAttemptCount =
+                            Number(
+                                current.paymentAttemptCount ||
+                                0
+                            ) + 1;
+
+
+                        console.log(
+                            "[MPESA CLAIM] CLAIMING:",
+                            {
+                                withdrawalId,
+
+                                previousStatus:
+                                    currentStatus,
+
+                                newStatus:
+                                    "processing",
+
+                                nextAttemptCount
+                            }
+                        );
+
+
+                        return {
+
+                            ...current,
+
+                            status:
+                                "processing",
+
+                            paymentStatus:
+                                "PROCESSING",
+
+                            processingAt:
+                                now,
+
+                            paymentAttemptedAt:
+                                now,
+
+                            paymentAttemptCount:
+                                nextAttemptCount,
+
+                            paymentFailureReason:
+                                "",
+
+                            reconciliationRequired:
+                                false,
+
+                            reconciliationAt:
+                                null,
+
+                            updatedAt:
+                                now
+                        };
                     }
                 );
 
-                return;
-            }
 
-            const now =
-                Date.now();
+            /*
+            ==========================================
+            M-PESA CLAIM RESULT
+            ==========================================
+            */
 
             console.log(
-                "[MPESA CLAIM] CLAIMING:",
+                "[MPESA CLAIM] RESULT:",
+                JSON.stringify(
+                    {
+                        withdrawalId,
+
+                        committed:
+                            mpesaClaimResult.committed,
+
+                        snapshotExists:
+                            mpesaClaimResult.snapshot.exists(),
+
+                        snapshotStatus:
+                            mpesaClaimResult.snapshot.val()?.status ||
+                            "",
+
+                        snapshotPaymentStatus:
+                            mpesaClaimResult.snapshot.val()?.paymentStatus ||
+                            "",
+
+                        snapshotAttemptCount:
+                            mpesaClaimResult.snapshot.val()?.paymentAttemptCount ||
+                            0
+                    },
+                    null,
+                    2
+                )
+            );
+
+
+            /*
+            ==========================================
+            VERIFY M-PESA CLAIM
+            ==========================================
+            */
+
+            if (
+                !mpesaClaimResult.committed
+            ) {
+
+                console.warn(
+                    "[MPESA CLAIM] NOT COMMITTED - PAYMENT WILL NOT BE SENT:",
+                    {
+                        withdrawalId,
+
+                        committed:
+                            mpesaClaimResult.committed
+                    }
+                );
+
+
+                const latestSnapshot =
+                    await withdrawalRef.get();
+
+                const latest =
+                    latestSnapshot.exists()
+                        ? latestSnapshot.val()
+                        : null;
+
+                const latestStatus =
+                    normalizeStatus(
+                        latest?.status
+                    );
+
+
+                console.log(
+                    "[MPESA CLAIM] LATEST FIREBASE STATE:",
+                    JSON.stringify(
+                        {
+                            withdrawalId,
+
+                            exists:
+                                latestSnapshot.exists(),
+
+                            latestStatus,
+
+                            rawStatus:
+                                latest?.status ||
+                                "",
+
+                            paymentStatus:
+                                latest?.paymentStatus ||
+                                "",
+
+                            paymentAttemptCount:
+                                latest?.paymentAttemptCount ||
+                                0
+                        },
+                        null,
+                        2
+                    )
+                );
+
+
+                let message =
+                    "Withdrawal payment claim could not be completed. No payment was sent.";
+
+
+                if (
+                    latestStatus ===
+                    "PROCESSING"
+                ) {
+
+                    message =
+                        "This withdrawal is already being processed.";
+                }
+                else if (
+                    latestStatus ===
+                    "PAID"
+                ) {
+
+                    message =
+                        "This withdrawal has already been paid.";
+                }
+                else if (
+                    latestStatus ===
+                    "RECONCILIATION_REQUIRED"
+                ) {
+
+                    message =
+                        "This withdrawal requires reconciliation before another payment attempt.";
+                }
+
+
+                return res.status(409).json({
+
+                    success: false,
+
+                    message,
+
+                    status:
+                        latest?.status || ""
+                });
+            }
+
+
+            /*
+            ==========================================
+            CLAIM SUCCESSFUL
+            ==========================================
+            */
+
+            console.log(
+                "[MPESA CLAIM] PAYMENT CLAIMED:",
                 {
                     withdrawalId,
+
                     previousStatus:
-                        currentStatus,
-                    newStatus:
-                        "processing"
+                        initialStatus
                 }
             );
 
-            return {
 
-                ...current,
-
-                status:
-                    "processing",
-
-                paymentStatus:
-                    "PROCESSING",
-
-                processingAt:
-                    now,
-
-                paymentAttemptedAt:
-                    now,
-
-                paymentFailureReason:
-                    "",
-
-                reconciliationRequired:
-                    false,
-
-                reconciliationAt:
-                    null,
-
-                updatedAt:
-                    now
-            };
-        }
-    );
-
-console.log(
-    "[MPESA CLAIM] RESULT:",
-    JSON.stringify(
-        {
-            withdrawalId,
-
-            committed:
-                mpesaClaimResult.committed,
-
-            snapshotExists:
-                mpesaClaimResult.snapshot.exists(),
-
-            snapshotStatus:
-                mpesaClaimResult.snapshot.val()?.status || "",
-
-            snapshotPaymentStatus:
-                mpesaClaimResult.snapshot.val()?.paymentStatus || ""
-        },
-        null,
-        2
-    )
-);
-/*
-==========================================
-VERIFY M-PESA CLAIM
-==========================================
-*/
-
-if (
-    !mpesaClaimResult.committed
-) {
-
-    console.warn(
-        "[MPESA CLAIM] NOT COMMITTED - PAYMENT WILL NOT BE SENT:",
-        {
-            withdrawalId,
-
-            committed:
-                mpesaClaimResult.committed,
-
-            snapshotExists:
-                mpesaClaimResult.snapshot.exists(),
-
-            snapshotStatus:
-                mpesaClaimResult.snapshot.val()?.status || "",
-
-            snapshotPaymentStatus:
-                mpesaClaimResult.snapshot.val()?.paymentStatus || ""
-        }
-    );
-
-    const latestSnapshot =
-        await withdrawalRef.get();
-
-    const latest =
-        latestSnapshot.exists()
-            ? latestSnapshot.val()
-            : null;
-
-    const latestStatus =
-        normalizeStatus(
-            latest?.status
-        );
-
-    console.log(
-    "[MPESA CLAIM] LATEST FIREBASE STATE:",
-    JSON.stringify(
-        {
-            withdrawalId,
-            latestStatus,
-            paymentStatus:
-                latest?.paymentStatus || "",
-            exists:
-                latestSnapshot.exists()
-        },
-        null,
-        2
-    )
-);
-
-    return res.status(409).json({
-
-        success: false,
-
-        message:
-            latestStatus ===
-            "PROCESSING"
-
-                ? "This withdrawal is already being processed."
-
-                : latestStatus ===
-                "PAID"
-
-                    ? "This withdrawal has already been paid."
-
-                    : latestStatus ===
-                    "RECONCILIATION_REQUIRED"
-
-                        ? "This withdrawal requires reconciliation before another payment attempt."
-
-                        : "Withdrawal payment claim could not be completed. No payment was sent.",
-
-        status:
-            latest?.status || ""
-    });
-}
+            /*
+            ==========================================
+            RELOAD AFTER CLAIM
+            ==========================================
+            */
 
             const claimedMpesaSnapshot =
                 await withdrawalRef.get();
@@ -4166,13 +4216,47 @@ if (
                 );
             }
 
+
             const claimedWithdrawal =
                 claimedMpesaSnapshot.val();
+
+
+            console.log(
+                "[MPESA] CLAIMED WITHDRAWAL READY FOR B2C:",
+                {
+                    withdrawalId,
+
+                    status:
+                        claimedWithdrawal.status,
+
+                    paymentStatus:
+                        claimedWithdrawal.paymentStatus,
+
+                    paymentAttemptCount:
+                        claimedWithdrawal.paymentAttemptCount ||
+                        0
+                }
+            );
+
+
+            /*
+            ==========================================
+            SUBMIT M-PESA B2C
+            ==========================================
+            */
 
             let payment;
 
 
             try {
+
+                console.log(
+                    "[MPESA] CALLING MpesaB2CManager.sendMoney:",
+                    {
+                        withdrawalId
+                    }
+                );
+
 
                 payment =
                     await MpesaB2CManager
@@ -4180,30 +4264,128 @@ if (
                             claimedWithdrawal
                         );
 
+
+                console.log(
+                    "[MPESA] B2C MANAGER RESPONSE:",
+                    JSON.stringify(
+                        {
+                            withdrawalId,
+
+                            success:
+                                payment?.success,
+
+                            status:
+                                payment?.status ||
+                                "",
+
+                            paymentStatus:
+                                payment?.paymentStatus ||
+                                "",
+
+                            conversationId:
+                                payment?.conversationId ||
+                                "",
+
+                            originatorConversationId:
+                                payment?.originatorConversationId ||
+                                "",
+
+                            confirmedFailure:
+                                payment?.confirmedFailure ===
+                                true,
+
+                            unknownOutcome:
+                                payment?.unknownOutcome ===
+                                true,
+
+                            reconciliationRequired:
+                                payment?.reconciliationRequired ===
+                                true
+                        },
+                        null,
+                        2
+                    )
+                );
+
             }
             catch (mpesaError) {
 
-                /*
-                    M-Pesa submission exceptions are
-                    ambiguous unless the manager explicitly
-                    proves otherwise.
+                console.error(
+                    "[MPESA SEND ERROR]",
+                    {
+                        withdrawalId,
 
-                    Never restore automatically.
+                        message:
+                            getSafeErrorMessage(
+                                mpesaError
+                            ),
+
+                        code:
+                            mpesaError?.code ||
+                            "",
+
+                        httpStatus:
+                            mpesaError?.response?.status ||
+                            "",
+
+                        unknownOutcome:
+                            mpesaError?.unknownOutcome ===
+                            true,
+
+                        reconciliationRequired:
+                            mpesaError?.reconciliationRequired ===
+                            true,
+
+                        confirmedFailure:
+                            mpesaError?.confirmedFailure ===
+                            true
+                    }
+                );
+
+
+                /*
+                ======================================
+                CONFIRMED FAILURE
+                ======================================
+
+                Only trust this if the manager explicitly
+                confirms that the payment could not have
+                been submitted successfully.
                 */
 
+                const confirmedFailure =
+                    mpesaError?.confirmedFailure ===
+                    true;
+
+
+                const unknownOutcome =
+                    mpesaError?.unknownOutcome ===
+                        true ||
+                    mpesaError?.reconciliationRequired ===
+                        true;
+
+
                 if (
-                    isUnknownProviderError(
-                        mpesaError
-                    )
+                    confirmedFailure &&
+                    !unknownOutcome
                 ) {
+
+                    await withdrawalManager
+                        .markPaymentFailed(
+                            withdrawalId,
+
+                            getSafeErrorMessage(
+                                mpesaError
+                            )
+                        );
 
                     await withdrawalRef.update({
 
                         status:
-                            "reconciliation_required",
+                            "payment_failed",
 
                         paymentStatus:
-                            "RECONCILIATION_REQUIRED",
+                            "FAILED",
 
                         paymentFailureReason:
                             getSafeErrorMessage(
@@ -4211,34 +4393,97 @@ if (
                             ),
 
                         reconciliationRequired:
-                            true,
+                            false,
 
                         reconciliationAt:
-                            Date.now(),
+                            null,
 
                         updatedAt:
                             Date.now()
                     });
 
-                    return res.status(202).json({
+
+                    return res.status(400).json({
 
                         success: false,
 
-                        reconciliationRequired:
+                        paymentFailed:
                             true,
 
+                        processing:
+                            false,
+
+                        reconciliationRequired:
+                            false,
+
                         message:
-                            "M-Pesa payment outcome is uncertain. The withdrawal has been placed into reconciliation."
+                            "M-Pesa payment failed. The withdrawal was marked payment_failed and wallet funds were restored.",
+
+                        withdrawalId
                     });
                 }
 
-                throw mpesaError;
+
+                /*
+                ======================================
+                UNKNOWN OUTCOME
+                ======================================
+
+                Any unclassified exception after the atomic
+                claim is treated as uncertain.
+
+                We must NOT restore funds because the B2C
+                provider may have received the request.
+                */
+
+                await withdrawalRef.update({
+
+                    status:
+                        "reconciliation_required",
+
+                    paymentStatus:
+                        "RECONCILIATION_REQUIRED",
+
+                    paymentFailureReason:
+                        getSafeErrorMessage(
+                            mpesaError
+                        ),
+
+                    reconciliationRequired:
+                        true,
+
+                    reconciliationAt:
+                        Date.now(),
+
+                    updatedAt:
+                        Date.now()
+                });
+
+
+                return res.status(202).json({
+
+                    success: false,
+
+                    paymentFailed:
+                        false,
+
+                    processing:
+                        false,
+
+                    reconciliationRequired:
+                        true,
+
+                    message:
+                        "M-Pesa payout outcome is uncertain. The withdrawal has been placed into reconciliation.",
+
+                    withdrawalId
+                });
             }
 
 
             /*
             ==========================================
-            M-PESA FAILED
+            M-PESA PROVIDER RESULT
             ==========================================
             */
 
@@ -4248,12 +4493,9 @@ if (
             ) {
 
                 /*
-                    IMPORTANT FIX:
-
-                    Do NOT pass a normal payment result
-                    into isUnknownProviderError().
-
-                    That function is for thrown Errors.
+                ======================================
+                UNKNOWN PAYMENT RESULT
+                ======================================
                 */
 
                 if (
@@ -4284,22 +4526,32 @@ if (
                             Date.now()
                     });
 
+
                     return res.status(202).json({
 
                         success: false,
+
+                        paymentFailed:
+                            false,
+
+                        processing:
+                            false,
 
                         reconciliationRequired:
                             true,
 
                         message:
-                            "M-Pesa payment outcome is uncertain. The withdrawal has been placed into reconciliation."
+                            "M-Pesa payment outcome is uncertain. The withdrawal has been placed into reconciliation.",
+
+                        withdrawalId
                     });
                 }
 
 
                 /*
-                    Only an explicit failed result reaches
-                    wallet restoration.
+                ======================================
+                CONFIRMED M-PESA FAILURE
+                ======================================
                 */
 
                 const mpesaStatus =
@@ -4309,11 +4561,14 @@ if (
                         payment?.resultStatus
                     );
 
+
                 const confirmedMpesaFailure =
                     mpesaStatus === "FAILED" ||
                     mpesaStatus === "FAILURE" ||
                     mpesaStatus === "REJECTED" ||
-                    payment?.confirmedFailure === true;
+                    payment?.confirmedFailure ===
+                    true;
+
 
                 if (
                     !confirmedMpesaFailure
@@ -4341,18 +4596,33 @@ if (
                             Date.now()
                     });
 
+
                     return res.status(202).json({
 
                         success: false,
+
+                        paymentFailed:
+                            false,
+
+                        processing:
+                            false,
 
                         reconciliationRequired:
                             true,
 
                         message:
-                            "M-Pesa returned an unresolved payment result. The withdrawal remains reserved for reconciliation."
+                            "M-Pesa returned an unresolved payment result. The withdrawal remains reserved for reconciliation.",
+
+                        withdrawalId
                     });
                 }
 
+
+                /*
+                ======================================
+                CONFIRMED FAILURE
+                ======================================
+                */
 
                 await withdrawalManager
                     .markPaymentFailed(
@@ -4362,6 +4632,45 @@ if (
                         "M-Pesa payment failed."
                     );
 
+
+                await withdrawalRef.update({
+
+                    status:
+                        "payment_failed",
+
+                    paymentStatus:
+                        "FAILED",
+
+                    paymentFailureReason:
+                        payment?.message ||
+                        "M-Pesa payment failed.",
+
+                    reconciliationRequired:
+                        false,
+
+                    reconciliationAt:
+                        null,
+
+                    updatedAt:
+                        Date.now()
+                });
+
+
+                console.log(
+                    "[MPESA] WITHDRAWAL MARKED PAYMENT_FAILED:",
+                    {
+                        withdrawalId,
+
+                        status:
+                            mpesaStatus,
+
+                        reason:
+                            payment?.message ||
+                            "M-Pesa payment failed."
+                    }
+                );
+
+
                 return res.status(400).json({
 
                     success: false,
@@ -4369,9 +4678,17 @@ if (
                     paymentFailed:
                         true,
 
+                    processing:
+                        false,
+
+                    reconciliationRequired:
+                        false,
+
                     message:
                         payment?.message ||
                         "M-Pesa payment failed.",
+
+                    withdrawalId,
 
                     payment
                 });
@@ -4380,7 +4697,17 @@ if (
 
             /*
             ==========================================
-            M-PESA PROCESSING
+            M-PESA ACCEPTED / PROCESSING
+            ==========================================
+
+            IMPORTANT:
+
+            A successful B2C submission does NOT necessarily
+            mean the beneficiary has received the money.
+
+            Keep the withdrawal PROCESSING until the M-Pesa
+            result callback/reconciliation confirms the final
+            outcome.
             ==========================================
             */
 
@@ -4392,27 +4719,56 @@ if (
                 paymentStatus:
                     "PROCESSING",
 
+                conversationId:
+                    payment.conversationId ||
+                    claimedWithdrawal.conversationId ||
+                    "",
+
+                originatorConversationId:
+                    payment.originatorConversationId ||
+                    claimedWithdrawal.originatorConversationId ||
+                    "",
+
+                paymentReference:
+                    payment.conversationId ||
+                    payment.originatorConversationId ||
+                    claimedWithdrawal.paymentReference ||
+                    "",
+
+                paymentFailureReason:
+                    "",
+
                 reconciliationRequired:
                     false,
 
                 reconciliationAt:
                     null,
 
-                paymentFailureReason:
-                    "",
-
                 updatedAt:
                     Date.now()
             });
 
+
             console.log(
-                "[MPESA] Withdrawal marked PROCESSING:",
-                withdrawalId
+                "[MPESA] B2C SUBMISSION ACCEPTED:",
+                {
+                    withdrawalId,
+
+                    conversationId:
+                        payment.conversationId ||
+                        "",
+
+                    originatorConversationId:
+                        payment.originatorConversationId ||
+                        ""
+                }
             );
+
 
             return res.json({
 
-                success: true,
+                success:
+                    true,
 
                 message:
                     "M-Pesa payment submitted and is processing.",
@@ -4432,9 +4788,10 @@ if (
                     originatorConversationId:
                         payment.originatorConversationId ||
                         ""
-                }
-            });
+                },
 
+                withdrawalId
+            });
         }
         catch (e) {
 
@@ -4448,7 +4805,9 @@ if (
                     initialStatus,
 
                     message:
-                        getSafeErrorMessage(e)
+                        getSafeErrorMessage(
+                            e
+                        )
                 }
             );
 
@@ -4492,7 +4851,9 @@ if (
                             await markPayPalReconciliationRequired(
                                 withdrawalId,
 
-                                getSafeErrorMessage(e)
+                                getSafeErrorMessage(
+                                    e
+                                )
                             );
 
                             return res.status(202).json({
@@ -4509,11 +4870,131 @@ if (
                     }
 
                 }
-                catch (reconciliationError) {
+                catch (
+                    reconciliationError
+                ) {
 
                     console.error(
                         "[PAYPAL RECONCILIATION ERROR]",
                         reconciliationError.message
+                    );
+                }
+            }
+
+
+            /*
+            ==========================================
+            M-PESA SAFETY
+            ==========================================
+
+            If an unexpected exception happens after the
+            M-Pesa claim, do not leave the withdrawal in
+            PROCESSING indefinitely.
+
+            Do not restore the wallet here.
+
+            The provider may already have received the
+            request.
+            ==========================================
+            */
+
+            if (
+                paymentMethod ===
+                "MPESA"
+            ) {
+
+                try {
+
+                    const currentSnapshot =
+                        await withdrawalRef.get();
+
+                    if (
+                        currentSnapshot.exists()
+                    ) {
+
+                        const current =
+                            currentSnapshot.val();
+
+                        const currentStatus =
+                            normalizeStatus(
+                                current.status
+                            );
+
+
+                        if (
+                            currentStatus ===
+                                "PROCESSING"
+                        ) {
+
+                            await withdrawalRef.update({
+
+                                status:
+                                    "reconciliation_required",
+
+                                paymentStatus:
+                                    "RECONCILIATION_REQUIRED",
+
+                                paymentFailureReason:
+                                    getSafeErrorMessage(
+                                        e
+                                    ),
+
+                                reconciliationRequired:
+                                    true,
+
+                                reconciliationAt:
+                                    Date.now(),
+
+                                updatedAt:
+                                    Date.now()
+                            });
+
+
+                            console.warn(
+                                "[MPESA] UNEXPECTED ERROR - MOVED TO RECONCILIATION:",
+                                {
+                                    withdrawalId
+                                }
+                            );
+
+
+                            return res.status(202).json({
+
+                                success:
+                                    false,
+
+                                paymentFailed:
+                                    false,
+
+                                processing:
+                                    false,
+
+                                reconciliationRequired:
+                                    true,
+
+                                message:
+                                    "M-Pesa payout outcome is uncertain. The withdrawal has been placed into reconciliation.",
+
+                                withdrawalId
+                            });
+                        }
+                    }
+
+                }
+                catch (
+                    reconciliationError
+                ) {
+
+                    console.error(
+                        "[MPESA RECONCILIATION ERROR]",
+                        {
+                            withdrawalId,
+
+                            message:
+                                getSafeErrorMessage(
+                                    reconciliationError
+                                )
+                        }
                     );
                 }
             }
