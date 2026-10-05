@@ -10,7 +10,8 @@ const crypto = require("crypto");
 //==========currency exchange========
 const {
     getUsdToKesRate,
-    usdToKes
+    usdToKes,
+    kesToUsd
 } = require("./services/CurrencyService");
 
 //=======PAYPAL========
@@ -4506,6 +4507,213 @@ SHOULD SHOW GROWTH SHEET
 ==========================================
 */
 
+
+
+
+
+//======================================================
+// LIVE SUBSCRIPTION PRICING
+//======================================================
+
+app.get("/pricing", async (req, res) => {
+
+    try {
+
+        /*
+        ==================================================
+        GET CURRENT USD/KES FX RATE
+        ==================================================
+        */
+
+        const fx =
+            await getUsdToKesRate();
+
+
+        /*
+        ==================================================
+        LOAD MASTER PLAN PRICES
+        ==================================================
+
+        Firebase remains the source of truth.
+
+        Premium = KES 750
+        Family  = KES 1800
+
+        These values are NOT changed.
+        We only convert them to USD for display.
+        */
+
+        const premium =
+            await PlanManager.getPlan("premium");
+
+        const family =
+            await PlanManager.getPlan("family");
+
+
+        if (!premium || !family) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "Subscription plans not found."
+
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        VALIDATE KES PRICES
+        ==================================================
+        */
+
+        const premiumKES =
+            Number(premium.price);
+
+        const familyKES =
+            Number(family.price);
+
+
+        if (
+            !Number.isFinite(premiumKES) ||
+            premiumKES <= 0 ||
+            !Number.isFinite(familyKES) ||
+            familyKES <= 0
+        ) {
+
+            return res.status(500).json({
+
+                success: false,
+
+                message:
+                    "Invalid subscription plan pricing."
+
+            });
+
+        }
+
+
+        /*
+        ==================================================
+        CONVERT KES → USD
+        ==================================================
+        */
+
+        const premiumUSD =
+            kesToUsd(
+                premiumKES,
+                fx.rate
+            );
+
+
+        const familyUSD =
+            kesToUsd(
+                familyKES,
+                fx.rate
+            );
+
+
+        /*
+        ==================================================
+        RESPONSE
+        ==================================================
+        */
+
+        return res.json({
+
+            success: true,
+
+            fx: {
+
+                rate:
+                    fx.rate,
+
+                provider:
+                    fx.provider,
+
+                date:
+                    fx.date,
+
+                fetchedAt:
+                    fx.fetchedAt
+
+            },
+
+            plans: {
+
+                premium: {
+
+                    planId:
+                        "premium",
+
+                    planName:
+                        premium.name ||
+                        "Premium",
+
+                    amountKES:
+                        premiumKES,
+
+                    amountUSD:
+                        premiumUSD,
+
+                    durationDays:
+                        Number(
+                            premium.durationDays || 30
+                        )
+
+                },
+
+                family: {
+
+                    planId:
+                        "family",
+
+                    planName:
+                        family.name ||
+                        "Family",
+
+                    amountKES:
+                        familyKES,
+
+                    amountUSD:
+                        familyUSD,
+
+                    durationDays:
+                        Number(
+                            family.durationDays || 30
+                        )
+
+                }
+
+            }
+
+        });
+
+    }
+
+    catch (error) {
+
+        console.error(
+            "[PRICING] Failed to load live pricing:",
+            error
+        );
+
+
+        return res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to load current pricing."
+
+        });
+
+    }
+
+});
 
 
 /*
