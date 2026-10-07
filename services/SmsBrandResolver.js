@@ -12,9 +12,9 @@ const DISCOVERY_LOCK_TTL =
     5 * 60 * 1000;
 
 const MAX_SEARCH_RESULTS = 8;
-const MAX_HTML_BYTES = 2 * 1024 * 1024;
-
 const MAX_CANDIDATES_TO_INSPECT = 6;
+const MAX_HTML_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 const memoryCache = new Map();
 
@@ -43,12 +43,26 @@ function normalizeUrl(url, baseUrl = "") {
     }
 
     try {
-        const absolute =
-            new URL(String(url).trim(), baseUrl || undefined);
+        const absolute = new URL(
+            String(url).trim(),
+            baseUrl || undefined
+        );
 
         absolute.hash = "";
 
         return absolute.href;
+    } catch {
+        return "";
+    }
+}
+
+
+function getDomainFromUrl(url) {
+    try {
+        return new URL(url)
+            .hostname
+            .toLowerCase()
+            .replace(/^www\./, "");
     } catch {
         return "";
     }
@@ -66,60 +80,139 @@ function getRegistrableDomain(hostname) {
         return "";
     }
 
-    const parts = host.split(".").filter(Boolean);
+    const parts =
+        host
+            .split(".")
+            .filter(Boolean);
 
     if (parts.length <= 2) {
         return host;
     }
 
-    const knownSecondLevelTlds = new Set([
-        "co.uk",
-        "org.uk",
-        "ac.uk",
-        "gov.uk",
-        "com.au",
-        "net.au",
-        "org.au",
-        "co.nz",
-        "com.br",
-        "com.cn",
-        "com.sg",
-        "co.za",
-        "co.ke",
-        "or.ke",
-        "ne.ke",
-        "go.ke",
-        "ac.ke",
-        "sc.ke",
-        "me.ke",
-        "mobi.ke",
-        "tv",
-    ]);
+    const knownSecondLevelTlds =
+        new Set([
+            "co.uk",
+            "org.uk",
+            "ac.uk",
+            "gov.uk",
+            "com.au",
+            "net.au",
+            "org.au",
+            "co.nz",
+            "com.br",
+            "com.cn",
+            "com.sg",
+            "co.za",
+            "co.ke",
+            "or.ke",
+            "ne.ke",
+            "go.ke",
+            "ac.ke",
+            "sc.ke",
+            "me.ke"
+        ]);
 
     const lastTwo =
-        parts.slice(-2).join(".");
+        parts
+            .slice(-2)
+            .join(".");
 
-    if (knownSecondLevelTlds.has(lastTwo)) {
-        return parts.slice(-3).join(".");
+    if (
+        knownSecondLevelTlds.has(
+            lastTwo
+        )
+    ) {
+        return parts
+            .slice(-3)
+            .join(".");
     }
 
-    return parts.slice(-2).join(".");
+    return parts
+        .slice(-2)
+        .join(".");
 }
 
 
-function getDomainFromUrl(url) {
+// ============================================================
+// BLOCKED SEARCH / INFRASTRUCTURE DOMAINS
+// ============================================================
+
+function isBlockedSearchDomain(url) {
+    if (!url) {
+        return true;
+    }
+
     try {
-        return new URL(url).hostname
-            .toLowerCase()
-            .replace(/^www\./, "");
+        const hostname =
+            new URL(url)
+                .hostname
+                .toLowerCase()
+                .replace(/^www\./, "");
+
+        const blockedDomains =
+            new Set([
+                "bing.com",
+                "google.com",
+                "duckduckgo.com",
+                "yahoo.com",
+                "baidu.com",
+                "yandex.com",
+                "ask.com",
+                "aol.com",
+                "ecosia.org"
+            ]);
+
+        if (
+            blockedDomains.has(hostname)
+        ) {
+            return true;
+        }
+
+        return (
+            hostname.endsWith(".bing.com") ||
+            hostname.endsWith(".google.com") ||
+            hostname.endsWith(".duckduckgo.com") ||
+            hostname.endsWith(".yahoo.com") ||
+            hostname.endsWith(".baidu.com") ||
+            hostname.endsWith(".yandex.com")
+        );
     } catch {
-        return "";
+        return true;
+    }
+}
+
+
+function isBlockedSearchResultUrl(url) {
+    if (!url) {
+        return true;
+    }
+
+    try {
+        const parsed =
+            new URL(url);
+
+        const pathAndQuery =
+            `${parsed.pathname}${parsed.search}`
+                .toLowerCase();
+
+        if (
+            pathAndQuery.includes("/search") ||
+            pathAndQuery.includes("/results") ||
+            pathAndQuery.includes("q=") ||
+            pathAndQuery.includes("query=")
+        ) {
+            return true;
+        }
+
+        return false;
+    } catch {
+        return true;
     }
 }
 
 
 // ============================================================
-// TEXT / HTML HELPERS
+// HTML / TEXT HELPERS
 // ============================================================
 
 function decodeHtmlEntities(value) {
@@ -134,7 +227,9 @@ function decodeHtmlEntities(value) {
         .replace(/&#x2F;/gi, "/")
         .replace(/&#(\d+);/g, (_, code) => {
             try {
-                return String.fromCharCode(Number(code));
+                return String.fromCharCode(
+                    Number(code)
+                );
             } catch {
                 return "";
             }
@@ -145,9 +240,18 @@ function decodeHtmlEntities(value) {
 function stripHtml(value) {
     return decodeHtmlEntities(
         String(value || "")
-            .replace(/<script[\s\S]*?<\/script>/gi, " ")
-            .replace(/<style[\s\S]*?<\/style>/gi, " ")
-            .replace(/<[^>]+>/g, " ")
+            .replace(
+                /<script[\s\S]*?<\/script>/gi,
+                " "
+            )
+            .replace(
+                /<style[\s\S]*?<\/style>/gi,
+                " "
+            )
+            .replace(
+                /<[^>]+>/g,
+                " "
+            )
     )
         .replace(/\s+/g, " ")
         .trim();
@@ -156,7 +260,11 @@ function stripHtml(value) {
 
 function extractMeta(html, name) {
     const escaped =
-        name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        String(name || "")
+            .replace(
+                /[.*+?^${}()|[\]\\]/g,
+                "\\$&"
+            );
 
     const patterns = [
         new RegExp(
@@ -178,10 +286,18 @@ function extractMeta(html, name) {
     ];
 
     for (const pattern of patterns) {
-        const match = html.match(pattern);
+        const match =
+            String(html || "").match(
+                pattern
+            );
 
-        if (match && match[1]) {
-            return decodeHtmlEntities(match[1]).trim();
+        if (
+            match &&
+            match[1]
+        ) {
+            return decodeHtmlEntities(
+                match[1]
+            ).trim();
         }
     }
 
@@ -201,20 +317,31 @@ function extractTitle(html) {
 }
 
 
-function extractCanonical(html, baseUrl) {
-    const match =
+function extractCanonical(
+    html,
+    baseUrl
+) {
+    const first =
         String(html || "").match(
             /<link[^>]+rel=["'][^"']*canonical[^"']*["'][^>]+href=["']([^"']+)["']/i
-        ) ||
+        );
+
+    const second =
         String(html || "").match(
             /<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*canonical[^"']*["']/i
         );
+
+    const match =
+        first || second;
 
     if (!match) {
         return "";
     }
 
-    return normalizeUrl(match[1], baseUrl);
+    return normalizeUrl(
+        match[1],
+        baseUrl
+    );
 }
 
 
@@ -222,14 +349,16 @@ function extractCanonical(html, baseUrl) {
 // ICON / LOGO EXTRACTION
 // ============================================================
 
-function extractIconCandidates(html, baseUrl) {
+function extractIconCandidates(
+    html,
+    baseUrl
+) {
     const candidates = [];
 
-    const regex =
-        /<link\b[^>]*>/gi;
-
     const tags =
-        String(html || "").match(regex) || [];
+        String(html || "").match(
+            /<link\b[^>]*>/gi
+        ) || [];
 
     for (const tag of tags) {
         const relMatch =
@@ -276,7 +405,10 @@ function extractIconCandidates(html, baseUrl) {
 }
 
 
-function extractLogoCandidates(html, baseUrl) {
+function extractLogoCandidates(
+    html,
+    baseUrl
+) {
     const candidates = [];
 
     const metaNames = [
@@ -287,26 +419,32 @@ function extractLogoCandidates(html, baseUrl) {
 
     for (const name of metaNames) {
         const value =
-            extractMeta(html, name);
+            extractMeta(
+                html,
+                name
+            );
 
-        if (value) {
-            const normalized =
-                normalizeUrl(
-                    value,
-                    baseUrl
-                );
+        if (!value) {
+            continue;
+        }
 
-            if (normalized) {
-                candidates.push(normalized);
-            }
+        const normalized =
+            normalizeUrl(
+                value,
+                baseUrl
+            );
+
+        if (normalized) {
+            candidates.push(
+                normalized
+            );
         }
     }
 
-    const imageRegex =
-        /<img\b[^>]*>/gi;
-
     const imageTags =
-        String(html || "").match(imageRegex) || [];
+        String(html || "").match(
+            /<img\b[^>]*>/gi
+        ) || [];
 
     for (const tag of imageTags) {
         const srcMatch =
@@ -337,7 +475,9 @@ function extractLogoCandidates(html, baseUrl) {
             );
 
         if (normalized) {
-            candidates.push(normalized);
+            candidates.push(
+                normalized
+            );
         }
     }
 
@@ -359,10 +499,13 @@ function extractJsonLd(html) {
 
     let match;
 
-    while ((match = regex.exec(html)) !== null) {
+    while (
+        (match = regex.exec(
+            String(html || "")
+        )) !== null
+    ) {
         const raw =
-            match[1]
-                ?.trim();
+            match[1]?.trim();
 
         if (!raw) {
             continue;
@@ -410,7 +553,6 @@ function flattenJsonLd(value) {
             for (const child of item) {
                 visit(child);
             }
-
             return;
         }
 
@@ -422,8 +564,14 @@ function flattenJsonLd(value) {
 
         result.push(item);
 
-        if (Array.isArray(item["@graph"])) {
-            visit(item["@graph"]);
+        if (
+            Array.isArray(
+                item["@graph"]
+            )
+        ) {
+            visit(
+                item["@graph"]
+            );
         }
     }
 
@@ -433,22 +581,26 @@ function flattenJsonLd(value) {
 }
 
 
-function extractSchemaOrganization(html, baseUrl) {
+function extractSchemaOrganization(
+    html,
+    baseUrl
+) {
     const blocks =
         extractJsonLd(html);
 
     const objects =
         flattenJsonLd(blocks);
 
-    const organizationTypes = new Set([
-        "organization",
-        "corporation",
-        "localbusiness",
-        "brand",
-        "store",
-        "bankorcreditunion",
-        "telecom"
-    ]);
+    const organizationTypes =
+        new Set([
+            "organization",
+            "corporation",
+            "localbusiness",
+            "brand",
+            "store",
+            "bankorcreditunion",
+            "telecom"
+        ]);
 
     let best = null;
 
@@ -464,20 +616,30 @@ function extractSchemaOrganization(html, baseUrl) {
         const normalizedTypes =
             types
                 .filter(Boolean)
-                .map(
-                    type =>
-                        String(type)
-                            .toLowerCase()
-                            .replace(/[^a-z]/g, "")
+                .map(type =>
+                    String(type)
+                        .toLowerCase()
+                        .replace(
+                            /[^a-z]/g,
+                            ""
+                        )
                 );
 
         const isOrganization =
             normalizedTypes.some(
                 type =>
-                    organizationTypes.has(type) ||
-                    type.includes("organization") ||
-                    type.includes("corporation") ||
-                    type.includes("telecom")
+                    organizationTypes.has(
+                        type
+                    ) ||
+                    type.includes(
+                        "organization"
+                    ) ||
+                    type.includes(
+                        "corporation"
+                    ) ||
+                    type.includes(
+                        "telecom"
+                    )
             );
 
         if (!isOrganization) {
@@ -485,7 +647,8 @@ function extractSchemaOrganization(html, baseUrl) {
         }
 
         const name =
-            typeof object.name === "string"
+            typeof object.name ===
+            "string"
                 ? object.name.trim()
                 : "";
 
@@ -495,7 +658,8 @@ function extractSchemaOrganization(html, baseUrl) {
 
         const url =
             normalizeUrl(
-                typeof object.url === "string"
+                typeof object.url ===
+                "string"
                     ? object.url
                     : "",
                 baseUrl
@@ -504,7 +668,8 @@ function extractSchemaOrganization(html, baseUrl) {
         let logo = "";
 
         if (
-            typeof object.logo === "string"
+            typeof object.logo ===
+            "string"
         ) {
             logo =
                 normalizeUrl(
@@ -513,19 +678,22 @@ function extractSchemaOrganization(html, baseUrl) {
                 );
         } else if (
             object.logo &&
-            typeof object.logo === "object"
+            typeof object.logo ===
+                "object"
         ) {
             logo =
                 normalizeUrl(
                     object.logo.url ||
-                    object.logo.contentUrl ||
-                    "",
+                        object.logo.contentUrl ||
+                        "",
                     baseUrl
                 );
         }
 
         const sameAs =
-            Array.isArray(object.sameAs)
+            Array.isArray(
+                object.sameAs
+            )
                 ? object.sameAs
                     .filter(Boolean)
                     .map(value =>
@@ -572,7 +740,7 @@ function cleanBrandName(value) {
     return String(value || "")
         .replace(/\s+/g, " ")
         .replace(
-            /\s*[-|–—:]\s*(official|home|homepage|website|site).*$/i,
+            /\s*[-|–—:]\s*(official|home|homepage|website|site)\s*$/i,
             ""
         )
         .replace(
@@ -603,7 +771,10 @@ function isGenericWebsiteName(value) {
         "online",
         "portal",
         "login",
-        "sign in"
+        "sign in",
+        "search",
+        "search - microsoft bing",
+        "microsoft bing"
     ];
 
     return genericNames.includes(
@@ -631,69 +802,29 @@ function deriveDomainIdentityName(
     }
 
     return firstPart
-        .replace(/[-_]+/g, " ")
-        .replace(/\b\w/g, char =>
-            char.toUpperCase()
+        .replace(
+            /[-_]+/g,
+            " "
+        )
+        .replace(
+            /\b\w/g,
+            char =>
+                char.toUpperCase()
         )
         .trim();
 }
 
 
 // ============================================================
-// SEARCH CANDIDATE BRAND INFERENCE
+// SEARCH RESULT BRAND INFERENCE
 // ============================================================
 
-function inferBrandFromSearchCandidate(
-    candidate
-) {
-    const text =
-        [
-            candidate?.title,
-            candidate?.snippet
-        ]
-            .filter(Boolean)
-            .join(" ")
-            .trim();
-
-    if (!text) {
-        return "";
-    }
-
-    return cleanBrandName(
-        text
-            .substringBefore?.("|") ||
-            text
-    );
-}
-
-
-// Compatibility helper because String.substringBefore
-// does not exist in JavaScript.
 function cleanSearchTitle(value) {
     return String(value || "")
         .split("|")[0]
         .split(" - ")[0]
         .split(" – ")[0]
         .trim();
-}
-
-
-function inferBrandFromSearchCandidateSafe(
-    candidate
-) {
-    const text =
-        firstNonBlank(
-            candidate?.title,
-            candidate?.snippet
-        );
-
-    if (!text) {
-        return "";
-    }
-
-    return cleanBrandName(
-        cleanSearchTitle(text)
-    );
 }
 
 
@@ -712,6 +843,25 @@ function firstNonBlank(...values) {
 }
 
 
+function inferBrandFromSearchCandidate(
+    candidate
+) {
+    const text =
+        firstNonBlank(
+            candidate?.title,
+            candidate?.snippet
+        );
+
+    if (!text) {
+        return "";
+    }
+
+    return cleanBrandName(
+        cleanSearchTitle(text)
+    );
+}
+
+
 // ============================================================
 // SEARCH RESULT -> WEBSITE
 // ============================================================
@@ -725,7 +875,17 @@ function websiteFromSearchCandidate(
 
     try {
         const parsed =
-            new URL(candidate.url);
+            new URL(
+                candidate.url
+            );
+
+        if (
+            isBlockedSearchDomain(
+                parsed.href
+            )
+        ) {
+            return "";
+        }
 
         return `${parsed.protocol}//${parsed.host}/`;
     } catch {
@@ -738,7 +898,9 @@ function websiteFromSearchCandidate(
 // SEARCH ENGINES
 // ============================================================
 
-async function searchDuckDuckGo(query) {
+async function searchDuckDuckGo(
+    query
+) {
     try {
         const response =
             await axios.get(
@@ -747,10 +909,12 @@ async function searchDuckDuckGo(query) {
                     params: {
                         q: query
                     },
-                    timeout: 10000,
+                    timeout: 7000,
                     headers: {
                         "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36"
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+                        Accept:
+                            "text/html,application/xhtml+xml"
                     },
                     maxContentLength:
                         MAX_HTML_BYTES,
@@ -760,7 +924,9 @@ async function searchDuckDuckGo(query) {
             );
 
         const html =
-            String(response.data || "");
+            String(
+                response.data || ""
+            );
 
         const results = [];
 
@@ -770,7 +936,8 @@ async function searchDuckDuckGo(query) {
         let match;
 
         while (
-            (match = regex.exec(html)) !== null
+            (match =
+                regex.exec(html)) !== null
         ) {
             const url =
                 decodeHtmlEntities(
@@ -786,9 +953,24 @@ async function searchDuckDuckGo(query) {
                 continue;
             }
 
+            const normalizedUrl =
+                normalizeUrl(url);
+
+            if (
+                !normalizedUrl ||
+                isBlockedSearchDomain(
+                    normalizedUrl
+                ) ||
+                isBlockedSearchResultUrl(
+                    normalizedUrl
+                )
+            ) {
+                continue;
+            }
+
             results.push({
                 engine: "duckduckgo",
-                url,
+                url: normalizedUrl,
                 title,
                 snippet: ""
             });
@@ -815,7 +997,7 @@ async function searchBing(query) {
                     params: {
                         q: query
                     },
-                    timeout: 10000,
+                    timeout: 7000,
                     headers: {
                         "User-Agent":
                             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
@@ -842,7 +1024,8 @@ async function searchBing(query) {
         let match;
 
         while (
-            (match = regex.exec(html)) !== null
+            (match =
+                regex.exec(html)) !== null
         ) {
             let url =
                 decodeHtmlEntities(
@@ -863,31 +1046,22 @@ async function searchBing(query) {
                 continue;
             }
 
-            /*
-             * Bing can return redirect URLs such as:
-             *
-             * https://www.bing.com/ck/a?...
-             *
-             * Those are not actual brand websites.
-             */
+            const normalizedUrl =
+                normalizeUrl(url);
 
-            try {
-                const parsed =
-                    new URL(url);
-
-                const hostname =
-                    parsed.hostname
-                        .toLowerCase()
-                        .replace(/^www\./, "");
-
-                if (
-                    hostname === "bing.com"
-                ) {
-                    continue;
-                }
-            } catch {
+            if (
+                !normalizedUrl ||
+                isBlockedSearchDomain(
+                    normalizedUrl
+                ) ||
+                isBlockedSearchResultUrl(
+                    normalizedUrl
+                )
+            ) {
                 continue;
             }
+
+            url = normalizedUrl;
 
             results.push({
                 engine: "bing",
@@ -898,7 +1072,6 @@ async function searchBing(query) {
         }
 
         return results;
-
     } catch (error) {
         console.warn(
             "[SMS BRAND] Bing search failed:",
@@ -913,6 +1086,7 @@ async function searchBing(query) {
 // ============================================================
 // PARALLEL SEARCH
 // ============================================================
+
 async function searchBrand(sender) {
     const queries = [
         `"${sender}" official`,
@@ -938,14 +1112,19 @@ async function searchBrand(sender) {
     );
 
     const settled =
-        await Promise.allSettled(tasks);
+        await Promise.allSettled(
+            tasks
+        );
 
     const allResults = [];
 
     for (const result of settled) {
         if (
-            result.status === "fulfilled" &&
-            Array.isArray(result.value)
+            result.status ===
+                "fulfilled" &&
+            Array.isArray(
+                result.value
+            )
         ) {
             allResults.push(
                 ...result.value
@@ -953,113 +1132,55 @@ async function searchBrand(sender) {
         }
     }
 
-    // --------------------------------------------------------
-    // Domains that should NEVER be treated as brand websites.
-    // These are search engines, social/search infrastructure,
-    // or redirect/search-result domains.
-    // --------------------------------------------------------
-
-    const blockedDomains = new Set([
-        "bing.com",
-        "www.bing.com",
-        "google.com",
-        "www.google.com",
-        "duckduckgo.com",
-        "www.duckduckgo.com",
-        "yahoo.com",
-        "www.yahoo.com",
-        "search.yahoo.com",
-        "baidu.com",
-        "www.baidu.com",
-        "yandex.com",
-        "www.yandex.com",
-        "ask.com",
-        "www.ask.com",
-        "aol.com",
-        "www.aol.com",
-        "ecosia.org",
-        "www.ecosia.org"
-    ]);
-
-    const filtered =
-        allResults.filter(candidate => {
-            const normalizedUrl =
-                normalizeUrl(
-                    candidate?.url
-                );
-
-            if (!normalizedUrl) {
-                return false;
-            }
-
-            let parsed;
-
-            try {
-                parsed =
-                    new URL(
-                        normalizedUrl
-                    );
-            } catch {
-                return false;
-            }
-
-            const hostname =
-                parsed.hostname
-                    .toLowerCase()
-                    .replace(/^www\./, "");
-
-            if (
-                blockedDomains.has(hostname)
-            ) {
-                return false;
-            }
-
-            // Reject obvious search-result URLs.
-            const pathAndQuery =
-                `${parsed.pathname}${parsed.search}`
-                    .toLowerCase();
-
-            if (
-                pathAndQuery.includes("/search") ||
-                pathAndQuery.includes("/results") ||
-                pathAndQuery.includes("q=") ||
-                pathAndQuery.includes("query=")
-            ) {
-                return false;
-            }
-
-            return true;
-        });
-
     const seen = new Set();
 
-    const unique =
-        filtered.filter(candidate => {
-            const normalizedUrl =
-                normalizeUrl(
-                    candidate.url
-                );
+    const unique = [];
 
-            if (!normalizedUrl) {
-                return false;
-            }
+    for (const candidate of allResults) {
+        const normalizedUrl =
+            normalizeUrl(
+                candidate?.url
+            );
 
-            const key =
+        if (!normalizedUrl) {
+            continue;
+        }
+
+        if (
+            isBlockedSearchDomain(
                 normalizedUrl
-                    .split("#")[0]
-                    .replace(/\/$/, "")
-                    .toLowerCase();
+            )
+        ) {
+            continue;
+        }
 
-            if (
-                seen.has(key)
-            ) {
-                return false;
-            }
+        if (
+            isBlockedSearchResultUrl(
+                normalizedUrl
+            )
+        ) {
+            continue;
+        }
 
-            seen.add(key);
+        const key =
+            normalizedUrl
+                .split("#")[0]
+                .replace(/\/$/, "")
+                .toLowerCase();
 
-            return true;
+        if (
+            seen.has(key)
+        ) {
+            continue;
+        }
+
+        seen.add(key);
+
+        unique.push({
+            ...candidate,
+            url: normalizedUrl
         });
+    }
 
     const limited =
         unique.slice(
@@ -1073,6 +1194,7 @@ async function searchBrand(sender) {
 
     return limited;
 }
+
 
 // ============================================================
 // WEBSITE INSPECTION
@@ -1114,7 +1236,9 @@ async function inspectWebsite(
             );
 
         const html =
-            String(response.data || "");
+            String(
+                response.data || ""
+            );
 
         if (!html) {
             return null;
@@ -1173,11 +1297,13 @@ async function inspectWebsite(
             cleanBrandName(
                 schema.name ||
                 siteName ||
-                inferBrandFromSearchCandidateSafe(
+                inferBrandFromSearchCandidate(
                     candidate
                 ) ||
                 (
-                    !isGenericWebsiteName(title)
+                    !isGenericWebsiteName(
+                        title
+                    )
                         ? title
                         : ""
                 ) ||
@@ -1193,21 +1319,27 @@ async function inspectWebsite(
             siteName,
             description,
             canonicalUrl,
+
             schemaName:
                 schema.name || "",
+
             schemaUrl:
                 schema.url || "",
+
             schemaLogo:
                 schema.logo || "",
+
             sameAs:
                 schema.sameAs || [],
+
             iconCandidates,
             logoCandidates,
+
             domain,
             registrableDomain,
+
             brandName
         };
-
     } catch (error) {
         console.warn(
             `[SMS BRAND] Website inspection failed for ${websiteUrl}:`,
@@ -1220,14 +1352,17 @@ async function inspectWebsite(
 
 
 // ============================================================
-// REMOTE IMAGE VALIDATION
+// IMAGE VALIDATION
 // ============================================================
 
-function isValidImageSignature(buffer) {
+function isValidImageSignature(
+    buffer
+) {
     if (!Buffer.isBuffer(buffer)) {
         return false;
     }
 
+    // PNG
     if (
         buffer.length >= 8 &&
         buffer
@@ -1248,6 +1383,7 @@ function isValidImageSignature(buffer) {
         return true;
     }
 
+    // JPEG
     if (
         buffer.length >= 3 &&
         buffer[0] === 0xff &&
@@ -1257,32 +1393,39 @@ function isValidImageSignature(buffer) {
         return true;
     }
 
+    // GIF
     if (
         buffer.length >= 6 &&
         (
             buffer
                 .subarray(0, 6)
-                .toString("ascii") === "GIF87a" ||
+                .toString("ascii") ===
+                "GIF87a" ||
             buffer
                 .subarray(0, 6)
-                .toString("ascii") === "GIF89a"
+                .toString("ascii") ===
+                "GIF89a"
         )
     ) {
         return true;
     }
 
+    // WEBP
     if (
         buffer.length >= 12 &&
         buffer
             .subarray(0, 4)
-            .toString("ascii") === "RIFF" &&
+            .toString("ascii") ===
+            "RIFF" &&
         buffer
             .subarray(8, 12)
-            .toString("ascii") === "WEBP"
+            .toString("ascii") ===
+            "WEBP"
     ) {
         return true;
     }
 
+    // BMP
     if (
         buffer.length >= 2 &&
         buffer[0] === 0x42 &&
@@ -1291,6 +1434,7 @@ function isValidImageSignature(buffer) {
         return true;
     }
 
+    // ICO
     if (
         buffer.length >= 4 &&
         buffer[0] === 0x00 &&
@@ -1304,6 +1448,7 @@ function isValidImageSignature(buffer) {
         return true;
     }
 
+    // AVIF / HEIF
     if (
         buffer.length >= 12 &&
         buffer
@@ -1332,15 +1477,20 @@ async function validateRemoteImage(
                 {
                     responseType:
                         "arraybuffer",
+
                     timeout: 5000,
+
                     maxContentLength:
-                        5 * 1024 * 1024,
+                        MAX_IMAGE_BYTES,
+
                     maxBodyLength:
-                        5 * 1024 * 1024,
+                        MAX_IMAGE_BYTES,
+
                     headers: {
                         "User-Agent":
                             "Mozilla/5.0"
                     },
+
                     validateStatus:
                         status =>
                             status >= 200 &&
@@ -1356,7 +1506,9 @@ async function validateRemoteImage(
             ).toLowerCase();
 
         if (
-            !contentType.includes("image/")
+            !contentType.includes(
+                "image/"
+            )
         ) {
             return false;
         }
@@ -1377,7 +1529,6 @@ async function validateRemoteImage(
         return isValidImageSignature(
             buffer
         );
-
     } catch {
         return false;
     }
@@ -1396,7 +1547,9 @@ async function scoreWebsiteCandidate(
     let score = 0;
 
     const normalizedSender =
-        normalizeSender(sender);
+        normalizeSender(
+            sender
+        );
 
     const brand =
         normalizeSender(
@@ -1413,9 +1566,11 @@ async function scoreWebsiteCandidate(
             website.registrableDomain
         );
 
+    // Exact brand identity
     if (
         brand &&
-        brand === normalizedSender
+        brand ===
+            normalizedSender
     ) {
         score += 0.35;
     } else if (
@@ -1432,6 +1587,7 @@ async function scoreWebsiteCandidate(
         score += 0.20;
     }
 
+    // Domain identity
     if (
         domain.includes(
             normalizedSender
@@ -1443,6 +1599,7 @@ async function scoreWebsiteCandidate(
         score += 0.25;
     }
 
+    // Search text
     const searchText =
         [
             searchCandidate?.title,
@@ -1460,6 +1617,10 @@ async function scoreWebsiteCandidate(
         score += 0.10;
     }
 
+    // Search candidate belongs to inspected website.
+    //
+    // This is useful evidence, but it is deliberately
+    // lower than the brand/domain identity signals.
     if (
         searchCandidate?.url
     ) {
@@ -1473,12 +1634,13 @@ async function scoreWebsiteCandidate(
             getRegistrableDomain(
                 candidateDomain
             ) ===
-            website.registrableDomain
+                website.registrableDomain
         ) {
-            score += 0.50;
+            score += 0.10;
         }
     }
 
+    // Canonical identity
     if (
         website.canonicalUrl
     ) {
@@ -1492,21 +1654,24 @@ async function scoreWebsiteCandidate(
         if (
             canonicalDomain &&
             canonicalDomain ===
-            website.registrableDomain
+                website.registrableDomain
         ) {
             score += 0.05;
         }
     }
 
+    // Schema.org organization name
     if (
         website.schemaName &&
         normalizeSender(
             website.schemaName
-        ) === normalizedSender
+        ) ===
+            normalizedSender
     ) {
         score += 0.15;
     }
 
+    // Schema organization URL
     if (
         website.schemaUrl &&
         getRegistrableDomain(
@@ -1514,7 +1679,7 @@ async function scoreWebsiteCandidate(
                 website.schemaUrl
             )
         ) ===
-        website.registrableDomain
+            website.registrableDomain
     ) {
         score += 0.10;
     }
@@ -1522,6 +1687,7 @@ async function scoreWebsiteCandidate(
     let verifiedLogo = false;
     let verifiedFavicon = false;
 
+    // Schema logo
     if (
         website.schemaLogo
     ) {
@@ -1531,6 +1697,7 @@ async function scoreWebsiteCandidate(
             );
     }
 
+    // HTML / OpenGraph logos
     if (
         !verifiedLogo &&
         website.logoCandidates?.length
@@ -1550,6 +1717,7 @@ async function scoreWebsiteCandidate(
         }
     }
 
+    // Favicon
     if (
         !verifiedLogo &&
         website.iconCandidates?.length
@@ -1577,6 +1745,7 @@ async function scoreWebsiteCandidate(
         score += 0.04;
     }
 
+    // Social identity / sameAs
     const sameAsCount =
         Array.isArray(
             website.sameAs
@@ -1595,6 +1764,7 @@ async function scoreWebsiteCandidate(
             score,
             1
         ),
+
         verifiedLogo,
         verifiedFavicon
     };
@@ -1609,13 +1779,44 @@ async function findBestCandidate(
     sender,
     candidates
 ) {
+    const externalCandidates =
+        (
+            Array.isArray(candidates)
+                ? candidates
+                : []
+        ).filter(candidate => {
+            if (!candidate?.url) {
+                return false;
+            }
+
+            if (
+                isBlockedSearchDomain(
+                    candidate.url
+                )
+            ) {
+                console.log(
+                    `[SMS BRAND] Ignoring search-engine candidate: ${candidate.url}`
+                );
+
+                return false;
+            }
+
+            if (
+                isBlockedSearchResultUrl(
+                    candidate.url
+                )
+            ) {
+                return false;
+            }
+
+            return true;
+        });
+
     const limited =
-        Array.isArray(candidates)
-            ? candidates.slice(
-                0,
-                MAX_CANDIDATES_TO_INSPECT
-            )
-            : [];
+        externalCandidates.slice(
+            0,
+            MAX_CANDIDATES_TO_INSPECT
+        );
 
     console.log(
         `[SMS BRAND] Inspecting ${limited.length} website candidates for "${sender}"`
@@ -1631,6 +1832,14 @@ async function findBestCandidate(
                         );
 
                     if (!website) {
+                        return null;
+                    }
+
+                    if (
+                        isBlockedSearchDomain(
+                            website.url
+                        )
+                    ) {
                         return null;
                     }
 
@@ -1652,7 +1861,10 @@ async function findBestCandidate(
 
     const scored = [];
 
-    for (const result of settled) {
+    for (
+        const result
+        of settled
+    ) {
         if (
             result.status ===
                 "fulfilled" &&
@@ -1666,7 +1878,8 @@ async function findBestCandidate(
 
     scored.sort(
         (a, b) =>
-            b.score - a.score
+            b.score -
+            a.score
     );
 
     const best =
@@ -1691,12 +1904,18 @@ async function findBestCandidate(
 // ============================================================
 
 function cacheKey(sender) {
-    return normalizeSender(sender)
-        .replace(/[.#$/[\]]/g, "_");
+    return normalizeSender(
+        sender
+    ).replace(
+        /[.#$/[\]]/g,
+        "_"
+    );
 }
 
 
-async function getFirebaseCache(sender) {
+async function getFirebaseCache(
+    sender
+) {
     const key =
         cacheKey(sender);
 
@@ -1713,8 +1932,10 @@ async function getFirebaseCache(sender) {
     const value =
         snapshot.val();
 
+    // Valid FOUND result
     if (
-        value.status === "FOUND"
+        value.status ===
+        "FOUND"
     ) {
         if (
             value.cachedAt &&
@@ -1728,8 +1949,10 @@ async function getFirebaseCache(sender) {
         return value;
     }
 
+    // Active discovery lock
     if (
-        value.status === "DISCOVERING"
+        value.status ===
+        "DISCOVERING"
     ) {
         if (
             value.discoveryStartedAt &&
@@ -1741,12 +1964,14 @@ async function getFirebaseCache(sender) {
         }
 
         // IMPORTANT:
-        // A stale DISCOVERING record must NOT be returned.
-        // Returning it here would permanently prevent
-        // resolveSender() from acquiring a new discovery lock.
+        // Never return stale DISCOVERING.
+        // This allows a new request to acquire
+        // a fresh discovery lock.
         return null;
     }
 
+    // UNKNOWN results are not treated as
+    // permanent discovery locks.
     return value;
 }
 
@@ -1769,6 +1994,7 @@ async function acquireDiscoveryLock(
             const now =
                 Date.now();
 
+            // Existing valid FOUND result
             if (
                 current &&
                 current.status ===
@@ -1781,6 +2007,7 @@ async function acquireDiscoveryLock(
                 return;
             }
 
+            // Existing active discovery
             if (
                 current &&
                 current.status ===
@@ -1798,13 +2025,19 @@ async function acquireDiscoveryLock(
             return {
                 status:
                     "DISCOVERING",
+
                 brandName: "",
                 logoUrl: "",
                 faviconUrl: "",
+
                 confidence: 0,
                 verified: false,
+
                 senderKey:
-                    normalizeSender(sender),
+                    normalizeSender(
+                        sender
+                    ),
+
                 discoveryStartedAt:
                     now
             };
@@ -1869,13 +2102,17 @@ async function discoverBrand(
                 normalized,
                 {
                     status: "UNKNOWN",
+
                     senderKey:
                         normalized,
+
                     brandName: "",
                     logoUrl: "",
                     faviconUrl: "",
+
                     confidence: 0,
                     verified: false,
+
                     cachedAt:
                         Date.now()
                 }
@@ -1895,13 +2132,17 @@ async function discoverBrand(
                 normalized,
                 {
                     status: "UNKNOWN",
+
                     senderKey:
                         normalized,
+
                     brandName: "",
                     logoUrl: "",
                     faviconUrl: "",
+
                     confidence: 0,
                     verified: false,
+
                     cachedAt:
                         Date.now()
                 }
@@ -1925,6 +2166,10 @@ async function discoverBrand(
 
         let logoUrl = "";
         let faviconUrl = "";
+
+        // ----------------------------------------------------
+        // Resolve actual verified logo
+        // ----------------------------------------------------
 
         if (
             website.schemaLogo &&
@@ -1956,6 +2201,10 @@ async function discoverBrand(
             }
         }
 
+        // ----------------------------------------------------
+        // Resolve favicon
+        // ----------------------------------------------------
+
         if (
             website.iconCandidates?.length
         ) {
@@ -1975,6 +2224,10 @@ async function discoverBrand(
             }
         }
 
+        // ----------------------------------------------------
+        // FINAL VERIFICATION
+        // ----------------------------------------------------
+
         const verified =
             confidence >= 0.80 &&
             Boolean(brandName) &&
@@ -1990,33 +2243,50 @@ async function discoverBrand(
             `[SMS BRAND] Verification result for "${normalized}": verified=${verified}, confidence=${confidence.toFixed(3)}, brand="${brandName}", logo=${Boolean(logoUrl)}, favicon=${Boolean(faviconUrl)}`
         );
 
+        // ----------------------------------------------------
+        // Not sufficiently verified
+        // ----------------------------------------------------
+
         if (!verified) {
             await saveCache(
                 normalized,
                 {
                     status: "UNKNOWN",
+
                     senderKey:
                         normalized,
+
                     brandName:
                         brandName || "",
+
                     logoUrl:
                         logoUrl || "",
+
                     faviconUrl:
                         faviconUrl || "",
+
                     confidence,
+
                     verified: false,
+
                     sourceDomain:
                         website.domain || "",
+
                     registrableDomain:
                         website.registrableDomain || "",
+
                     canonicalUrl:
                         website.canonicalUrl || "",
+
                     schemaName:
                         website.schemaName || "",
+
                     schemaUrl:
                         website.schemaUrl || "",
+
                     schemaLogo:
                         website.schemaLogo || "",
+
                     cachedAt:
                         Date.now()
                 }
@@ -2025,31 +2295,52 @@ async function discoverBrand(
             return;
         }
 
+        // ----------------------------------------------------
+        // VERIFIED RESULT
+        // ----------------------------------------------------
+
+        const now =
+            Date.now();
+
         const result = {
             status: "FOUND",
+
             senderKey:
                 normalized,
+
             brandName,
+
             logoUrl,
+
             faviconUrl,
+
             confidence,
+
             verified: true,
+
             sourceDomain:
                 website.domain || "",
+
             registrableDomain:
                 website.registrableDomain || "",
+
             canonicalUrl:
                 website.canonicalUrl || "",
+
             schemaName:
                 website.schemaName || "",
+
             schemaUrl:
                 website.schemaUrl || "",
+
             schemaLogo:
                 website.schemaLogo || "",
+
             lastVerifiedAt:
-                Date.now(),
+                now,
+
             cachedAt:
-                Date.now()
+                now
         };
 
         await saveCache(
@@ -2072,13 +2363,17 @@ async function discoverBrand(
                 normalized,
                 {
                     status: "UNKNOWN",
+
                     senderKey:
                         normalized,
+
                     brandName: "",
                     logoUrl: "",
                     faviconUrl: "",
+
                     confidence: 0,
                     verified: false,
+
                     cachedAt:
                         Date.now()
                 }
@@ -2118,40 +2413,43 @@ async function resolveSender(
         cacheKey(normalized);
 
     // --------------------------------------------------------
-    // 1. Memory cache
+    // 1. MEMORY CACHE
     // --------------------------------------------------------
 
     const memory =
         memoryCache.get(key);
 
     if (memory) {
+        const value =
+            memory.value;
+
         if (
-            memory.value.status ===
+            value.status ===
                 "FOUND" &&
-            memory.value.cachedAt &&
+            value.cachedAt &&
             Date.now() -
-                memory.value.cachedAt <
+                value.cachedAt <
                 VERIFIED_CACHE_TTL
         ) {
-            return memory.value;
+            return value;
         }
 
         if (
-            memory.value.status ===
+            value.status ===
                 "DISCOVERING" &&
-            memory.value.discoveryStartedAt &&
+            value.discoveryStartedAt &&
             Date.now() -
-                memory.value.discoveryStartedAt <
+                value.discoveryStartedAt <
                 DISCOVERY_LOCK_TTL
         ) {
-            return memory.value;
+            return value;
         }
 
         memoryCache.delete(key);
     }
 
     // --------------------------------------------------------
-    // 2. Firebase cache
+    // 2. FIREBASE CACHE
     // --------------------------------------------------------
 
     const cached =
@@ -2180,7 +2478,7 @@ async function resolveSender(
     }
 
     // --------------------------------------------------------
-    // 3. Acquire discovery lock
+    // 3. ACQUIRE DISCOVERY LOCK
     // --------------------------------------------------------
 
     const acquired =
@@ -2201,28 +2499,37 @@ async function resolveSender(
         return {
             status:
                 "DISCOVERING",
+
+            senderKey:
+                normalized,
+
             brandName: "",
             logoUrl: "",
             faviconUrl: "",
+
             confidence: 0,
             verified: false
         };
     }
 
     // --------------------------------------------------------
-    // 4. Background discovery
+    // 4. BACKGROUND DISCOVERY
     // --------------------------------------------------------
 
     const discovering = {
         status:
             "DISCOVERING",
+
         senderKey:
             normalized,
+
         brandName: "",
         logoUrl: "",
         faviconUrl: "",
+
         confidence: 0,
         verified: false,
+
         discoveryStartedAt:
             Date.now()
     };
@@ -2236,33 +2543,18 @@ async function resolveSender(
         }
     );
 
-    setImmediate(
-        () => {
-            discoverBrand(
-                normalized
-            ).catch(error => {
-                console.error(
-                    `[SMS BRAND] Background discovery error for "${normalized}":`,
-                    error
-                );
-            });
-        }
-    );
+    setImmediate(() => {
+        discoverBrand(
+            normalized
+        ).catch(error => {
+            console.error(
+                `[SMS BRAND] Background discovery error for "${normalized}":`,
+                error
+            );
+        });
+    });
 
     return discovering;
-}
-
-
-// ============================================================
-// REGEX HELPER
-// ============================================================
-
-function escapeRegex(value) {
-    return String(value || "")
-        .replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&"
-        );
 }
 
 
