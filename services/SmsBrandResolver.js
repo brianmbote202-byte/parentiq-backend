@@ -818,7 +818,9 @@ async function searchBing(query) {
                     timeout: 10000,
                     headers: {
                         "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36"
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
+                        Accept:
+                            "text/html,application/xhtml+xml"
                     },
                     maxContentLength:
                         MAX_HTML_BYTES,
@@ -828,7 +830,9 @@ async function searchBing(query) {
             );
 
         const html =
-            String(response.data || "");
+            String(
+                response.data || ""
+            );
 
         const results = [];
 
@@ -840,10 +844,10 @@ async function searchBing(query) {
         while (
             (match = regex.exec(html)) !== null
         ) {
-            const url =
+            let url =
                 decodeHtmlEntities(
                     match[1]
-                );
+                ).trim();
 
             const title =
                 stripHtml(
@@ -859,6 +863,32 @@ async function searchBing(query) {
                 continue;
             }
 
+            /*
+             * Bing can return redirect URLs such as:
+             *
+             * https://www.bing.com/ck/a?...
+             *
+             * Those are not actual brand websites.
+             */
+
+            try {
+                const parsed =
+                    new URL(url);
+
+                const hostname =
+                    parsed.hostname
+                        .toLowerCase()
+                        .replace(/^www\./, "");
+
+                if (
+                    hostname === "bing.com"
+                ) {
+                    continue;
+                }
+            } catch {
+                continue;
+            }
+
             results.push({
                 engine: "bing",
                 url,
@@ -868,6 +898,7 @@ async function searchBing(query) {
         }
 
         return results;
+
     } catch (error) {
         console.warn(
             "[SMS BRAND] Bing search failed:",
@@ -882,7 +913,6 @@ async function searchBing(query) {
 // ============================================================
 // PARALLEL SEARCH
 // ============================================================
-
 async function searchBrand(sender) {
     const queries = [
         `"${sender}" official`,
@@ -923,10 +953,88 @@ async function searchBrand(sender) {
         }
     }
 
+    // --------------------------------------------------------
+    // Domains that should NEVER be treated as brand websites.
+    // These are search engines, social/search infrastructure,
+    // or redirect/search-result domains.
+    // --------------------------------------------------------
+
+    const blockedDomains = new Set([
+        "bing.com",
+        "www.bing.com",
+        "google.com",
+        "www.google.com",
+        "duckduckgo.com",
+        "www.duckduckgo.com",
+        "yahoo.com",
+        "www.yahoo.com",
+        "search.yahoo.com",
+        "baidu.com",
+        "www.baidu.com",
+        "yandex.com",
+        "www.yandex.com",
+        "ask.com",
+        "www.ask.com",
+        "aol.com",
+        "www.aol.com",
+        "ecosia.org",
+        "www.ecosia.org"
+    ]);
+
+    const filtered =
+        allResults.filter(candidate => {
+            const normalizedUrl =
+                normalizeUrl(
+                    candidate?.url
+                );
+
+            if (!normalizedUrl) {
+                return false;
+            }
+
+            let parsed;
+
+            try {
+                parsed =
+                    new URL(
+                        normalizedUrl
+                    );
+            } catch {
+                return false;
+            }
+
+            const hostname =
+                parsed.hostname
+                    .toLowerCase()
+                    .replace(/^www\./, "");
+
+            if (
+                blockedDomains.has(hostname)
+            ) {
+                return false;
+            }
+
+            // Reject obvious search-result URLs.
+            const pathAndQuery =
+                `${parsed.pathname}${parsed.search}`
+                    .toLowerCase();
+
+            if (
+                pathAndQuery.includes("/search") ||
+                pathAndQuery.includes("/results") ||
+                pathAndQuery.includes("q=") ||
+                pathAndQuery.includes("query=")
+            ) {
+                return false;
+            }
+
+            return true;
+        });
+
     const seen = new Set();
 
     const unique =
-        allResults.filter(candidate => {
+        filtered.filter(candidate => {
             const normalizedUrl =
                 normalizeUrl(
                     candidate.url
@@ -942,7 +1050,9 @@ async function searchBrand(sender) {
                     .replace(/\/$/, "")
                     .toLowerCase();
 
-            if (seen.has(key)) {
+            if (
+                seen.has(key)
+            ) {
                 return false;
             }
 
@@ -958,12 +1068,11 @@ async function searchBrand(sender) {
         );
 
     console.log(
-        `[SMS BRAND] Search produced ${unique.length} unique candidates; inspecting ${limited.length}`
+        `[SMS BRAND] Search produced ${allResults.length} raw candidates, ${unique.length} valid external candidates; inspecting ${limited.length}`
     );
 
     return limited;
 }
-
 
 // ============================================================
 // WEBSITE INSPECTION
