@@ -5,6 +5,10 @@ require("./events/CacheEventListener");
 const SubscriptionManager = require("./subscriptions/SubscriptionManager");
 const CommissionManager = require("./commissions/CommissionManager");
 
+//=====SMS BRANDS SENDERS=====
+const smsBrandRoutes =
+    require("./routes/smsBrandRoutes");
+
 const crypto = require("crypto");
 
 //==========currency exchange========
@@ -634,6 +638,8 @@ app.use("/activities", activityRoutes);
 app.use("/payout", payoutRoutes);
 
 app.use("/mpesa/balance", balanceRoutes);
+
+app.use("/api/sms-brand",smsBrandRoutes);
 
 
 
