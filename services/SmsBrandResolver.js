@@ -1,29 +1,105 @@
 const axios = require("axios");
 const { db } = require("../firebase");
 
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
 const CACHE_PATH = "sms_brand_cache";
 
 const VERIFIED_CACHE_TTL =
     Number(process.env.SMS_BRAND_CACHE_TTL_MS) ||
     30 * 24 * 60 * 60 * 1000;
 
+const UNKNOWN_CACHE_TTL =
+    Number(process.env.SMS_BRAND_UNKNOWN_CACHE_TTL_MS) ||
+    6 * 60 * 60 * 1000;
+
 const DISCOVERY_LOCK_TTL =
     Number(process.env.SMS_BRAND_DISCOVERY_LOCK_TTL_MS) ||
     5 * 60 * 1000;
 
-const MAX_SEARCH_RESULTS = 8;
+const MAX_SEARCH_RESULTS = 12;
+
 const MAX_CANDIDATES_TO_INSPECT = 6;
-const MAX_HTML_BYTES = 2 * 1024 * 1024;
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+const MAX_HTML_BYTES =
+    2 * 1024 * 1024;
+
+const MAX_IMAGE_BYTES =
+    5 * 1024 * 1024;
+
+const BING_TIMEOUT =
+    Number(process.env.SMS_BRAND_BING_TIMEOUT_MS) ||
+    7000;
+
+const DDG_TIMEOUT =
+    Number(process.env.SMS_BRAND_DDG_TIMEOUT_MS) ||
+    4500;
+
+
+// ============================================================
+// MEMORY CACHE
+// ============================================================
 
 const memoryCache = new Map();
 
 
 // ============================================================
-// NORMALIZATION
+// SEARCH ENGINE / NON-BRAND DOMAINS
+// ============================================================
+
+const BLOCKED_REGISTRABLE_DOMAINS = new Set([
+    "google.com",
+    "google.co.uk",
+    "google.co.ke",
+
+    "bing.com",
+
+    "duckduckgo.com",
+
+    "yahoo.com",
+    "yahoo.co.uk",
+
+    "baidu.com",
+
+    "yandex.com",
+    "yandex.ru",
+
+    "ask.com",
+
+    "aol.com",
+
+    "ecosia.org",
+
+    "wikipedia.org",
+    "wikimedia.org",
+
+    "facebook.com",
+    "instagram.com",
+
+    "linkedin.com",
+
+    "twitter.com",
+    "x.com",
+
+    "youtube.com",
+
+    "tiktok.com",
+
+    "reddit.com",
+
+    "pinterest.com"
+]);
+
+
+// ============================================================
+// GENERIC HELPERS
 // ============================================================
 
 function normalizeSender(sender) {
+
     return String(sender || "")
         .trim()
         .toLowerCase()
@@ -33,95 +109,194 @@ function normalizeSender(sender) {
 }
 
 
-// ============================================================
-// URL HELPERS
-// ============================================================
+function senderKey(sender) {
 
-function normalizeUrl(url, baseUrl = "") {
-    if (!url) {
-        return "";
-    }
+    return normalizeSender(sender)
+        .replace(/[^a-z0-9]/g, "");
+}
+
+
+function decodeHtmlEntities(value) {
+
+    return String(value || "")
+        .replace(/&amp;/gi, "&")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&apos;/gi, "'")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&#x2F;/gi, "/")
+        .replace(/&#47;/gi, "/")
+        .replace(/&#x27;/gi, "'")
+        .replace(/&#34;/gi, '"');
+}
+
+
+function stripHtml(value) {
+
+    return decodeHtmlEntities(
+        String(value || "")
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
+            .replace(/<[^>]+>/g, " ")
+    )
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+
+function cleanText(value) {
+
+    return stripHtml(value)
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+
+function safeUrl(rawUrl, baseUrl = null) {
 
     try {
-        const absolute = new URL(
-            String(url).trim(),
-            baseUrl || undefined
-        );
 
-        absolute.hash = "";
+        if (!rawUrl) {
+            return null;
+        }
 
-        return absolute.href;
+        let value =
+            decodeHtmlEntities(
+                String(rawUrl).trim()
+            );
+
+        if (!value) {
+            return null;
+        }
+
+        if (
+            value.startsWith("//")
+        ) {
+            value = "https:" + value;
+        }
+
+        if (
+            baseUrl &&
+            !/^https?:\/\//i.test(value)
+        ) {
+
+            value =
+                new URL(
+                    value,
+                    baseUrl
+                ).href;
+        }
+
+        const parsed =
+            new URL(value);
+
+        if (
+            parsed.protocol !== "http:" &&
+            parsed.protocol !== "https:"
+        ) {
+            return null;
+        }
+
+        return parsed.href;
+
     } catch {
-        return "";
+
+        return null;
     }
 }
 
 
-function getDomainFromUrl(url) {
+function hostnameFromUrl(url) {
+
     try {
+
         return new URL(url)
             .hostname
             .toLowerCase()
             .replace(/^www\./, "");
+
     } catch {
+
         return "";
     }
 }
 
 
 function getRegistrableDomain(hostname) {
+
     const host =
         String(hostname || "")
             .toLowerCase()
-            .replace(/^www\./, "")
-            .trim();
+            .replace(/^www\./, "");
 
     if (!host) {
         return "";
     }
 
     const parts =
-        host
-            .split(".")
+        host.split(".")
             .filter(Boolean);
 
     if (parts.length <= 2) {
         return host;
     }
 
-    const knownSecondLevelTlds =
-        new Set([
-            "co.uk",
-            "org.uk",
-            "ac.uk",
-            "gov.uk",
-            "com.au",
-            "net.au",
-            "org.au",
-            "co.nz",
-            "com.br",
-            "com.cn",
-            "com.sg",
-            "co.za",
-            "co.ke",
-            "or.ke",
-            "ne.ke",
-            "go.ke",
-            "ac.ke",
-            "sc.ke",
-            "me.ke"
-        ]);
+    const secondLevelTlds = new Set([
+        "co.uk",
+        "org.uk",
+        "ac.uk",
+
+        "co.ke",
+        "or.ke",
+        "ne.ke",
+
+        "co.tz",
+        "or.tz",
+
+        "co.ug",
+        "or.ug",
+
+        "co.rw",
+        "or.rw",
+
+        "co.za",
+
+        "co.ng",
+        "com.ng",
+
+        "co.gh",
+        "com.gh",
+
+        "com.au",
+        "net.au",
+        "org.au",
+
+        "co.nz",
+
+        "co.in",
+
+        "com.sg",
+
+        "com.my",
+
+        "com.mx",
+
+        "com.br",
+
+        "com.tr",
+
+        "com.ar"
+    ]);
 
     const lastTwo =
-        parts
-            .slice(-2)
-            .join(".");
+        parts.slice(-2).join(".");
 
     if (
-        knownSecondLevelTlds.has(
-            lastTwo
-        )
+        secondLevelTlds.has(lastTwo) &&
+        parts.length >= 3
     ) {
+
         return parts
             .slice(-3)
             .join(".");
@@ -133,170 +308,221 @@ function getRegistrableDomain(hostname) {
 }
 
 
-// ============================================================
-// BLOCKED SEARCH / INFRASTRUCTURE DOMAINS
-// ============================================================
+function registrableDomainFromUrl(url) {
 
-function isBlockedSearchDomain(url) {
-    if (!url) {
-        return true;
-    }
-
-    try {
-        const hostname =
-            new URL(url)
-                .hostname
-                .toLowerCase()
-                .replace(/^www\./, "");
-
-        const blockedDomains =
-            new Set([
-                "bing.com",
-                "google.com",
-                "duckduckgo.com",
-                "yahoo.com",
-                "baidu.com",
-                "yandex.com",
-                "ask.com",
-                "aol.com",
-                "ecosia.org"
-            ]);
-
-        if (
-            blockedDomains.has(hostname)
-        ) {
-            return true;
-        }
-
-        return (
-            hostname.endsWith(".bing.com") ||
-            hostname.endsWith(".google.com") ||
-            hostname.endsWith(".duckduckgo.com") ||
-            hostname.endsWith(".yahoo.com") ||
-            hostname.endsWith(".baidu.com") ||
-            hostname.endsWith(".yandex.com")
-        );
-    } catch {
-        return true;
-    }
+    return getRegistrableDomain(
+        hostnameFromUrl(url)
+    );
 }
 
 
-function isBlockedSearchResultUrl(url) {
-    if (!url) {
+function isBlockedDomain(url) {
+
+    const domain =
+        registrableDomainFromUrl(url);
+
+    if (!domain) {
         return true;
     }
 
+    return BLOCKED_REGISTRABLE_DOMAINS
+        .has(domain);
+}
+
+
+function isUsableExternalUrl(url) {
+
+    if (!url) {
+        return false;
+    }
+
     try {
+
         const parsed =
             new URL(url);
 
-        const pathAndQuery =
-            `${parsed.pathname}${parsed.search}`
-                .toLowerCase();
-
         if (
-            pathAndQuery.includes("/search") ||
-            pathAndQuery.includes("/results") ||
-            pathAndQuery.includes("q=") ||
-            pathAndQuery.includes("query=")
+            parsed.protocol !== "http:" &&
+            parsed.protocol !== "https:"
         ) {
-            return true;
+            return false;
         }
 
-        return false;
-    } catch {
+        if (
+            isBlockedDomain(url)
+        ) {
+            return false;
+        }
+
         return true;
+
+    } catch {
+
+        return false;
     }
 }
 
 
 // ============================================================
-// HTML / TEXT HELPERS
+// BRAND NAME CLEANING
 // ============================================================
 
-function decodeHtmlEntities(value) {
-    return String(value || "")
-        .replace(/&amp;/gi, "&")
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;/gi, "'")
-        .replace(/&apos;/gi, "'")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">")
-        .replace(/&#x27;/gi, "'")
-        .replace(/&#x2F;/gi, "/")
-        .replace(/&#(\d+);/g, (_, code) => {
-            try {
-                return String.fromCharCode(
-                    Number(code)
-                );
-            } catch {
-                return "";
-            }
-        });
+function cleanBrandName(value) {
+
+    let text =
+        cleanText(value);
+
+    if (!text) {
+        return "";
+    }
+
+    text =
+        text
+            .replace(/\s+/g, " ")
+            .trim();
+
+    text =
+        text
+            .replace(
+                /\s*[-|–—:]\s*(official|home|homepage|website|contact|login|sign in).*$/i,
+                ""
+            )
+            .trim();
+
+    text =
+        text
+            .replace(
+                /\s+(official website|official site)$/i,
+                ""
+            )
+            .trim();
+
+    if (
+        text.length > 100
+    ) {
+        text =
+            text.substring(0, 100)
+                .trim();
+    }
+
+    return text;
 }
 
 
-function stripHtml(value) {
-    return decodeHtmlEntities(
-        String(value || "")
-            .replace(
-                /<script[\s\S]*?<\/script>/gi,
-                " "
-            )
-            .replace(
-                /<style[\s\S]*?<\/style>/gi,
-                " "
-            )
-            .replace(
-                /<[^>]+>/g,
-                " "
-            )
-    )
-        .replace(/\s+/g, " ")
-        .trim();
+function normalizeComparableText(value) {
+
+    return cleanText(value)
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "");
 }
 
 
-function extractMeta(html, name) {
-    const escaped =
-        String(name || "")
-            .replace(
-                /[.*+?^${}()|[\]\\]/g,
-                "\\$&"
+// ============================================================
+// HTML EXTRACTION
+// ============================================================
+
+function extractTitle(html) {
+
+    const match =
+        String(html || "")
+            .match(
+                /<title[^>]*>([\s\S]*?)<\/title>/i
             );
 
-    const patterns = [
-        new RegExp(
-            `<meta[^>]+name=["']${escaped}["'][^>]+content=["']([^"']+)["']`,
-            "i"
-        ),
-        new RegExp(
-            `<meta[^>]+content=["']([^"']+)["'][^>]+name=["']${escaped}["']`,
-            "i"
-        ),
-        new RegExp(
-            `<meta[^>]+property=["']${escaped}["'][^>]+content=["']([^"']+)["']`,
-            "i"
-        ),
-        new RegExp(
-            `<meta[^>]+content=["']([^"']+)["'][^>]+property=["']${escaped}["']`,
-            "i"
-        )
-    ];
+    if (!match) {
+        return "";
+    }
 
-    for (const pattern of patterns) {
-        const match =
-            String(html || "").match(
-                pattern
+    return cleanBrandName(
+        match[1]
+    );
+}
+
+
+function extractCanonical(html, baseUrl) {
+
+    const match =
+        String(html || "")
+            .match(
+                /<link\b[^>]*rel=["'][^"']*canonical[^"']*["'][^>]*>/i
+            );
+
+    if (!match) {
+        return "";
+    }
+
+    const href =
+        match[0].match(
+            /\bhref=["']([^"']+)["']/i
+        );
+
+    if (!href) {
+        return "";
+    }
+
+    return safeUrl(
+        href[1],
+        baseUrl
+    ) || "";
+}
+
+
+function extractMetaContent(
+    html,
+    names
+) {
+
+    const wanted =
+        new Set(
+            names.map(
+                value =>
+                    String(value)
+                        .toLowerCase()
+            )
+        );
+
+    const regex =
+        /<meta\b[^>]*>/gi;
+
+    let match;
+
+    while (
+        (match = regex.exec(html || "")) !== null
+    ) {
+
+        const tag =
+            match[0];
+
+        const nameMatch =
+            tag.match(
+                /\b(?:name|property|itemprop)=["']([^"']+)["']/i
+            );
+
+        if (!nameMatch) {
+            continue;
+        }
+
+        const name =
+            nameMatch[1]
+                .toLowerCase()
+                .trim();
+
+        if (
+            !wanted.has(name)
+        ) {
+            continue;
+        }
+
+        const contentMatch =
+            tag.match(
+                /\bcontent=["']([^"']+)["']/i
             );
 
         if (
-            match &&
-            match[1]
+            contentMatch
         ) {
             return decodeHtmlEntities(
-                match[1]
+                contentMatch[1]
             ).trim();
         }
     }
@@ -305,97 +531,227 @@ function extractMeta(html, name) {
 }
 
 
-function extractTitle(html) {
-    const match =
-        String(html || "").match(
-            /<title[^>]*>([\s\S]*?)<\/title>/i
-        );
+// ============================================================
+// JSON-LD
+// ============================================================
 
-    return match
-        ? stripHtml(match[1])
-        : "";
+function extractJsonLdObjects(html) {
+
+    const results = [];
+
+    const regex =
+        /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+
+    let match;
+
+    while (
+        (match = regex.exec(html || "")) !== null
+    ) {
+
+        const raw =
+            match[1]
+                .trim();
+
+        if (!raw) {
+            continue;
+        }
+
+        try {
+
+            const parsed =
+                JSON.parse(raw);
+
+            if (
+                Array.isArray(parsed)
+            ) {
+
+                for (
+                    const item of parsed
+                ) {
+
+                    if (
+                        item &&
+                        typeof item === "object"
+                    ) {
+
+                        results.push(item);
+                    }
+                }
+
+            } else if (
+                parsed &&
+                typeof parsed === "object"
+            ) {
+
+                results.push(parsed);
+            }
+
+        } catch {
+            // Ignore malformed JSON-LD.
+        }
+    }
+
+    return results;
 }
 
 
-function extractCanonical(
-    html,
-    baseUrl
+function extractJsonLdIdentity(
+    objects
 ) {
-    const first =
-        String(html || "").match(
-            /<link[^>]+rel=["'][^"']*canonical[^"']*["'][^>]+href=["']([^"']+)["']/i
-        );
 
-    const second =
-        String(html || "").match(
-            /<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*canonical[^"']*["']/i
-        );
+    let name = "";
+    let url = "";
+    let logo = "";
 
-    const match =
-        first || second;
+    for (
+        const object of objects
+    ) {
 
-    if (!match) {
-        return "";
+        if (!object) {
+            continue;
+        }
+
+        const types =
+            Array.isArray(object["@type"])
+                ? object["@type"]
+                : [object["@type"]];
+
+        const normalizedTypes =
+            types
+                .filter(Boolean)
+                .map(
+                    type =>
+                        String(type)
+                            .toLowerCase()
+                );
+
+        const isOrganization =
+            normalizedTypes.some(
+                type =>
+                    type.includes("organization") ||
+                    type.includes("corporation") ||
+                    type.includes("brand") ||
+                    type === "localbusiness"
+            );
+
+        if (
+            !isOrganization
+        ) {
+            continue;
+        }
+
+        if (
+            !name &&
+            typeof object.name === "string"
+        ) {
+
+            name =
+                cleanBrandName(
+                    object.name
+                );
+        }
+
+        if (
+            !url &&
+            typeof object.url === "string"
+        ) {
+
+            url =
+                object.url.trim();
+        }
+
+        if (
+            !logo
+        ) {
+
+            if (
+                typeof object.logo === "string"
+            ) {
+
+                logo =
+                    object.logo.trim();
+
+            } else if (
+                object.logo &&
+                typeof object.logo === "object" &&
+                typeof object.logo.url === "string"
+            ) {
+
+                logo =
+                    object.logo.url.trim();
+            }
+        }
     }
 
-    return normalizeUrl(
-        match[1],
-        baseUrl
-    );
+    return {
+        name,
+        url,
+        logo
+    };
 }
 
 
 // ============================================================
-// ICON / LOGO EXTRACTION
+// IMAGE / ICON EXTRACTION
 // ============================================================
 
 function extractIconCandidates(
     html,
     baseUrl
 ) {
+
     const candidates = [];
 
-    const tags =
-        String(html || "").match(
-            /<link\b[^>]*>/gi
-        ) || [];
+    const regex =
+        /<link\b[^>]*>/gi;
 
-    for (const tag of tags) {
+    let match;
+
+    while (
+        (match = regex.exec(html || "")) !== null
+    ) {
+
+        const tag =
+            match[0];
+
         const relMatch =
             tag.match(
-                /rel=["']([^"']+)["']/i
+                /\brel=["']([^"']+)["']/i
             );
 
         const hrefMatch =
             tag.match(
-                /href=["']([^"']+)["']/i
+                /\bhref=["']([^"']+)["']/i
             );
 
-        if (!hrefMatch) {
+        if (
+            !relMatch ||
+            !hrefMatch
+        ) {
             continue;
         }
 
         const rel =
-            String(
-                relMatch?.[1] || ""
-            ).toLowerCase();
+            relMatch[1]
+                .toLowerCase();
 
-        const href =
-            normalizeUrl(
+        if (
+            !(
+                rel.includes("icon") ||
+                rel.includes("shortcut")
+            )
+        ) {
+            continue;
+        }
+
+        const url =
+            safeUrl(
                 hrefMatch[1],
                 baseUrl
             );
 
-        if (!href) {
-            continue;
-        }
-
-        if (
-            rel.includes("icon") ||
-            rel.includes("apple-touch-icon") ||
-            rel.includes("mask-icon")
-        ) {
-            candidates.push(href);
+        if (url) {
+            candidates.push(url);
         }
     }
 
@@ -409,44 +765,44 @@ function extractLogoCandidates(
     html,
     baseUrl
 ) {
+
     const candidates = [];
 
-    const metaNames = [
-        "og:image",
-        "og:logo",
-        "twitter:image"
-    ];
+    const metaLogo =
+        extractMetaContent(
+            html,
+            [
+                "og:logo",
+                "logo"
+            ]
+        );
 
-    for (const name of metaNames) {
-        const value =
-            extractMeta(
-                html,
-                name
-            );
+    if (metaLogo) {
 
-        if (!value) {
-            continue;
-        }
-
-        const normalized =
-            normalizeUrl(
-                value,
+        const url =
+            safeUrl(
+                metaLogo,
                 baseUrl
             );
 
-        if (normalized) {
-            candidates.push(
-                normalized
-            );
+        if (url) {
+            candidates.push(url);
         }
     }
 
-    const imageTags =
-        String(html || "").match(
-            /<img\b[^>]*>/gi
-        ) || [];
 
-    for (const tag of imageTags) {
+    const regex =
+        /<img\b[^>]*>/gi;
+
+    let match;
+
+    while (
+        (match = regex.exec(html || "")) !== null
+    ) {
+
+        const tag =
+            match[0];
+
         const srcMatch =
             tag.match(
                 /\bsrc=["']([^"']+)["']/i
@@ -456,28 +812,41 @@ function extractLogoCandidates(
             continue;
         }
 
-        const lower =
-            tag.toLowerCase();
+        const descriptor =
+            [
+                tag.match(
+                    /\balt=["']([^"']+)["']/i
+                )?.[1] || "",
 
-        const looksLikeLogo =
-            lower.includes("logo") ||
-            lower.includes("brand") ||
-            lower.includes("header");
+                tag.match(
+                    /\bclass=["']([^"']+)["']/i
+                )?.[1] || "",
 
-        if (!looksLikeLogo) {
+                tag.match(
+                    /\bid=["']([^"']+)["']/i
+                )?.[1] || "",
+
+                srcMatch[1]
+            ]
+                .join(" ")
+                .toLowerCase();
+
+        if (
+            !/\b(logo|brand|wordmark|logotype)\b/i.test(
+                descriptor
+            )
+        ) {
             continue;
         }
 
-        const normalized =
-            normalizeUrl(
+        const url =
+            safeUrl(
                 srcMatch[1],
                 baseUrl
             );
 
-        if (normalized) {
-            candidates.push(
-                normalized
-            );
+        if (url) {
+            candidates.push(url);
         }
     }
 
@@ -488,354 +857,84 @@ function extractLogoCandidates(
 
 
 // ============================================================
-// JSON-LD
+// IMAGE VALIDATION
 // ============================================================
 
-function extractJsonLd(html) {
-    const blocks = [];
+async function validateImageUrl(
+    url
+) {
 
-    const regex =
-        /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
-
-    let match;
-
-    while (
-        (match = regex.exec(
-            String(html || "")
-        )) !== null
+    if (
+        !isUsableExternalUrl(url)
     ) {
-        const raw =
-            match[1]?.trim();
-
-        if (!raw) {
-            continue;
-        }
-
-        try {
-            blocks.push(
-                JSON.parse(raw)
-            );
-        } catch {
-            try {
-                const cleaned =
-                    raw
-                        .replace(
-                            /^\s*<!--/,
-                            ""
-                        )
-                        .replace(
-                            /-->\s*$/,
-                            ""
-                        );
-
-                blocks.push(
-                    JSON.parse(cleaned)
-                );
-            } catch {
-                // Ignore malformed JSON-LD.
-            }
-        }
+        return false;
     }
 
-    return blocks;
-}
+    try {
 
+        const response =
+            await axios.get(
+                url,
+                {
+                    timeout: 5000,
+                    maxContentLength:
+                        MAX_IMAGE_BYTES,
+                    maxBodyLength:
+                        MAX_IMAGE_BYTES,
+                    responseType: "arraybuffer",
+                    validateStatus:
+                        status =>
+                            status >= 200 &&
+                            status < 400
+                }
+            );
 
-function flattenJsonLd(value) {
-    const result = [];
-
-    function visit(item) {
-        if (!item) {
-            return;
-        }
-
-        if (Array.isArray(item)) {
-            for (const child of item) {
-                visit(child);
-            }
-            return;
-        }
+        const contentType =
+            String(
+                response.headers[
+                    "content-type"
+                ] || ""
+            )
+                .toLowerCase();
 
         if (
-            typeof item !== "object"
-        ) {
-            return;
-        }
-
-        result.push(item);
-
-        if (
-            Array.isArray(
-                item["@graph"]
+            contentType.startsWith(
+                "image/"
             )
         ) {
-            visit(
-                item["@graph"]
-            );
+            return true;
         }
+
+        return false;
+
+    } catch {
+
+        return false;
     }
-
-    visit(value);
-
-    return result;
 }
 
 
-function extractSchemaOrganization(
-    html,
-    baseUrl
+async function findVerifiedImage(
+    candidates
 ) {
-    const blocks =
-        extractJsonLd(html);
 
-    const objects =
-        flattenJsonLd(blocks);
-
-    const organizationTypes =
-        new Set([
-            "organization",
-            "corporation",
-            "localbusiness",
-            "brand",
-            "store",
-            "bankorcreditunion",
-            "telecom"
-        ]);
-
-    let best = null;
-
-    for (const object of objects) {
-        const typeValue =
-            object["@type"];
-
-        const types =
-            Array.isArray(typeValue)
-                ? typeValue
-                : [typeValue];
-
-        const normalizedTypes =
-            types
-                .filter(Boolean)
-                .map(type =>
-                    String(type)
-                        .toLowerCase()
-                        .replace(
-                            /[^a-z]/g,
-                            ""
-                        )
-                );
-
-        const isOrganization =
-            normalizedTypes.some(
-                type =>
-                    organizationTypes.has(
-                        type
-                    ) ||
-                    type.includes(
-                        "organization"
-                    ) ||
-                    type.includes(
-                        "corporation"
-                    ) ||
-                    type.includes(
-                        "telecom"
-                    )
-            );
-
-        if (!isOrganization) {
-            continue;
-        }
-
-        const name =
-            typeof object.name ===
-            "string"
-                ? object.name.trim()
-                : "";
-
-        if (!name) {
-            continue;
-        }
-
-        const url =
-            normalizeUrl(
-                typeof object.url ===
-                "string"
-                    ? object.url
-                    : "",
-                baseUrl
-            );
-
-        let logo = "";
-
-        if (
-            typeof object.logo ===
-            "string"
-        ) {
-            logo =
-                normalizeUrl(
-                    object.logo,
-                    baseUrl
-                );
-        } else if (
-            object.logo &&
-            typeof object.logo ===
-                "object"
-        ) {
-            logo =
-                normalizeUrl(
-                    object.logo.url ||
-                        object.logo.contentUrl ||
-                        "",
-                    baseUrl
-                );
-        }
-
-        const sameAs =
-            Array.isArray(
-                object.sameAs
+    const unique =
+        [
+            ...new Set(
+                candidates
+                    .filter(Boolean)
             )
-                ? object.sameAs
-                    .filter(Boolean)
-                    .map(value =>
-                        normalizeUrl(
-                            value,
-                            baseUrl
-                        )
-                    )
-                    .filter(Boolean)
-                : [];
+        ];
 
-        const candidate = {
-            name,
-            url,
-            logo,
-            sameAs
-        };
+    for (
+        const url of unique
+    ) {
 
         if (
-            !best ||
-            Boolean(candidate.logo) ||
-            Boolean(candidate.url)
+            await validateImageUrl(url)
         ) {
-            best = candidate;
-        }
-    }
 
-    return (
-        best || {
-            name: "",
-            url: "",
-            logo: "",
-            sameAs: []
-        }
-    );
-}
-
-
-// ============================================================
-// BRAND NAME CLEANING
-// ============================================================
-
-function cleanBrandName(value) {
-    return String(value || "")
-        .replace(/\s+/g, " ")
-        .replace(
-            /\s*[-|–—:]\s*(official|home|homepage|website|site)\s*$/i,
-            ""
-        )
-        .replace(
-            /\s+(official website|official site)$/i,
-            ""
-        )
-        .trim();
-}
-
-
-function isGenericWebsiteName(value) {
-    const normalized =
-        String(value || "")
-            .toLowerCase()
-            .trim();
-
-    if (!normalized) {
-        return true;
-    }
-
-    const genericNames = [
-        "home",
-        "homepage",
-        "welcome",
-        "official website",
-        "official site",
-        "website",
-        "online",
-        "portal",
-        "login",
-        "sign in",
-        "search",
-        "search - microsoft bing",
-        "microsoft bing"
-    ];
-
-    return genericNames.includes(
-        normalized
-    );
-}
-
-
-function deriveDomainIdentityName(
-    domain,
-    registrableDomain
-) {
-    const source =
-        registrableDomain ||
-        domain ||
-        "";
-
-    const firstPart =
-        source
-            .split(".")[0]
-            .trim();
-
-    if (!firstPart) {
-        return "";
-    }
-
-    return firstPart
-        .replace(
-            /[-_]+/g,
-            " "
-        )
-        .replace(
-            /\b\w/g,
-            char =>
-                char.toUpperCase()
-        )
-        .trim();
-}
-
-
-// ============================================================
-// SEARCH RESULT BRAND INFERENCE
-// ============================================================
-
-function cleanSearchTitle(value) {
-    return String(value || "")
-        .split("|")[0]
-        .split(" - ")[0]
-        .split(" – ")[0]
-        .trim();
-}
-
-
-function firstNonBlank(...values) {
-    for (const value of values) {
-        if (
-            value !== undefined &&
-            value !== null &&
-            String(value).trim()
-        ) {
-            return String(value).trim();
+            return url;
         }
     }
 
@@ -843,237 +942,273 @@ function firstNonBlank(...values) {
 }
 
 
-function inferBrandFromSearchCandidate(
-    candidate
-) {
-    const text =
-        firstNonBlank(
-            candidate?.title,
-            candidate?.snippet
-        );
-
-    if (!text) {
-        return "";
-    }
-
-    return cleanBrandName(
-        cleanSearchTitle(text)
-    );
-}
-
-
 // ============================================================
-// SEARCH RESULT -> WEBSITE
+// SEARCH RESULT URL NORMALIZATION
 // ============================================================
 
-function websiteFromSearchCandidate(
-    candidate
+function normalizeSearchResultUrl(
+    rawUrl,
+    engine
 ) {
-    if (!candidate?.url) {
-        return "";
+
+    if (!rawUrl) {
+        return null;
     }
 
+    let url =
+        safeUrl(rawUrl);
+
+    if (!url) {
+        return null;
+    }
+
+
+    // DuckDuckGo redirect URL.
     try {
+
         const parsed =
-            new URL(
-                candidate.url
-            );
+            new URL(url);
 
         if (
-            isBlockedSearchDomain(
-                parsed.href
-            )
+            engine === "duckduckgo" &&
+            parsed.hostname
+                .toLowerCase()
+                .includes("duckduckgo.com") &&
+            parsed.pathname === "/l/"
         ) {
-            return "";
+
+            const redirected =
+                parsed.searchParams.get(
+                    "uddg"
+                );
+
+            if (redirected) {
+
+                url =
+                    safeUrl(
+                        decodeURIComponent(
+                            redirected
+                        )
+                    );
+            }
         }
 
-        return `${parsed.protocol}//${parsed.host}/`;
     } catch {
-        return "";
+        return null;
     }
+
+
+    if (
+        !url
+    ) {
+        return null;
+    }
+
+
+    if (
+        !isUsableExternalUrl(url)
+    ) {
+        return null;
+    }
+
+
+    return url;
 }
 
 
 // ============================================================
-// SEARCH ENGINES
+// SEARCH RESULT PARSERS
 // ============================================================
 
-async function searchDuckDuckGo(
+function parseBingResults(
+    html
+) {
+
+    const results = [];
+
+    const regex =
+        /<li\b[^>]*class=["'][^"']*\bb_algo\b[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi;
+
+    let match;
+
+    while (
+        (match = regex.exec(html || "")) !== null
+    ) {
+
+        const block =
+            match[1];
+
+        const linkMatch =
+            block.match(
+                /<h2\b[^>]*>\s*<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i
+            );
+
+        if (!linkMatch) {
+            continue;
+        }
+
+        const rawUrl =
+            linkMatch[1];
+
+        const title =
+            cleanText(
+                linkMatch[2]
+            );
+
+        const snippetMatch =
+            block.match(
+                /<p\b[^>]*>([\s\S]*?)<\/p>/i
+            );
+
+        const snippet =
+            snippetMatch
+                ? cleanText(
+                    snippetMatch[1]
+                )
+                : "";
+
+        const url =
+            normalizeSearchResultUrl(
+                rawUrl,
+                "bing"
+            );
+
+        if (!url) {
+            continue;
+        }
+
+        results.push({
+            url,
+            title,
+            snippet,
+            engine: "bing"
+        });
+
+        if (
+            results.length >=
+            MAX_SEARCH_RESULTS
+        ) {
+            break;
+        }
+    }
+
+    return results;
+}
+
+
+function parseDuckDuckGoResults(
+    html
+) {
+
+    const results = [];
+
+    const regex =
+        /<a\b[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+    let match;
+
+    while (
+        (match = regex.exec(html || "")) !== null
+    ) {
+
+        const rawUrl =
+            match[1];
+
+        const title =
+            cleanText(
+                match[2]
+            );
+
+        const after =
+            html.substring(
+                match.index
+            );
+
+        const snippetMatch =
+            after.match(
+                /class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div)>/i
+            );
+
+        const snippet =
+            snippetMatch
+                ? cleanText(
+                    snippetMatch[1]
+                )
+                : "";
+
+        const url =
+            normalizeSearchResultUrl(
+                rawUrl,
+                "duckduckgo"
+            );
+
+        if (!url) {
+            continue;
+        }
+
+        results.push({
+            url,
+            title,
+            snippet,
+            engine: "duckduckgo"
+        });
+
+        if (
+            results.length >=
+            MAX_SEARCH_RESULTS
+        ) {
+            break;
+        }
+    }
+
+    return results;
+}
+
+
+// ============================================================
+// SEARCH ENGINE CALLS
+// ============================================================
+
+async function searchBing(
     query
 ) {
+
     try {
-        const response =
-            await axios.get(
-                "https://html.duckduckgo.com/html/",
-                {
-                    params: {
-                        q: query
-                    },
-                    timeout: 7000,
-                    headers: {
-                        "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
-                        Accept:
-                            "text/html,application/xhtml+xml"
-                    },
-                    maxContentLength:
-                        MAX_HTML_BYTES,
-                    maxBodyLength:
-                        MAX_HTML_BYTES
-                }
-            );
 
-        const html =
-            String(
-                response.data || ""
-            );
-
-        const results = [];
-
-        const regex =
-            /<a[^>]+class=["'][^"']*result__a[^"']*["'][^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-        let match;
-
-        while (
-            (match =
-                regex.exec(html)) !== null
-        ) {
-            const url =
-                decodeHtmlEntities(
-                    match[1]
-                );
-
-            const title =
-                stripHtml(
-                    match[2]
-                );
-
-            if (!url) {
-                continue;
-            }
-
-            const normalizedUrl =
-                normalizeUrl(url);
-
-            if (
-                !normalizedUrl ||
-                isBlockedSearchDomain(
-                    normalizedUrl
-                ) ||
-                isBlockedSearchResultUrl(
-                    normalizedUrl
-                )
-            ) {
-                continue;
-            }
-
-            results.push({
-                engine: "duckduckgo",
-                url: normalizedUrl,
-                title,
-                snippet: ""
-            });
-        }
-
-        return results;
-    } catch (error) {
-        console.warn(
-            "[SMS BRAND] DuckDuckGo search failed:",
-            error.message
-        );
-
-        return [];
-    }
-}
-
-
-async function searchBing(query) {
-    try {
         const response =
             await axios.get(
                 "https://www.bing.com/search",
                 {
                     params: {
-                        q: query
+                        q: query,
+                        count: 10
                     },
-                    timeout: 7000,
-                    headers: {
-                        "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
-                        Accept:
-                            "text/html,application/xhtml+xml"
-                    },
+
+                    timeout:
+                        BING_TIMEOUT,
+
                     maxContentLength:
                         MAX_HTML_BYTES,
+
                     maxBodyLength:
-                        MAX_HTML_BYTES
+                        MAX_HTML_BYTES,
+
+                    headers: {
+                        "User-Agent":
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+                        "Accept":
+                            "text/html,application/xhtml+xml"
+                    }
                 }
             );
 
-        const html =
-            String(
-                response.data || ""
-            );
+        return parseBingResults(
+            response.data
+        );
 
-        const results = [];
-
-        const regex =
-            /<li[^>]+class=["'][^"']*b_algo[^"']*["'][^>]*>[\s\S]*?<h2[^>]*>\s*<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?/gi;
-
-        let match;
-
-        while (
-            (match =
-                regex.exec(html)) !== null
-        ) {
-            let url =
-                decodeHtmlEntities(
-                    match[1]
-                ).trim();
-
-            const title =
-                stripHtml(
-                    match[2]
-                );
-
-            const snippet =
-                stripHtml(
-                    match[3] || ""
-                );
-
-            if (!url) {
-                continue;
-            }
-
-            const normalizedUrl =
-                normalizeUrl(url);
-
-            if (
-                !normalizedUrl ||
-                isBlockedSearchDomain(
-                    normalizedUrl
-                ) ||
-                isBlockedSearchResultUrl(
-                    normalizedUrl
-                )
-            ) {
-                continue;
-            }
-
-            url = normalizedUrl;
-
-            results.push({
-                engine: "bing",
-                url,
-                title,
-                snippet
-            });
-        }
-
-        return results;
     } catch (error) {
-        console.warn(
+
+        console.error(
             "[SMS BRAND] Bing search failed:",
             error.message
         );
@@ -1083,116 +1218,337 @@ async function searchBing(query) {
 }
 
 
+async function searchDuckDuckGo(
+    query
+) {
+
+    try {
+
+        const response =
+            await axios.get(
+                "https://html.duckduckgo.com/html/",
+                {
+                    params: {
+                        q: query
+                    },
+
+                    timeout:
+                        DDG_TIMEOUT,
+
+                    maxContentLength:
+                        MAX_HTML_BYTES,
+
+                    maxBodyLength:
+                        MAX_HTML_BYTES,
+
+                    headers: {
+                        "User-Agent":
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+                        "Accept":
+                            "text/html,application/xhtml+xml"
+                    }
+                }
+            );
+
+        return parseDuckDuckGoResults(
+            response.data
+        );
+
+    } catch (error) {
+
+        console.error(
+            "[SMS BRAND] DuckDuckGo search failed:",
+            error.message
+        );
+
+        return [];
+    }
+}
+
+
 // ============================================================
-// PARALLEL SEARCH
+// SEARCH CANDIDATE SCORING
 // ============================================================
 
-async function searchBrand(sender) {
+function scoreSearchCandidate(
+    candidate,
+    sender
+) {
+
+    const normalizedSender =
+        senderKey(sender);
+
+    const domain =
+        registrableDomainFromUrl(
+            candidate.url
+        );
+
+    if (!domain) {
+        return 0;
+    }
+
+    const domainParts =
+        domain.split(".");
+
+    const domainName =
+        domainParts[0] || "";
+
+    const normalizedDomain =
+        normalizeComparableText(
+            domainName
+        );
+
+    const title =
+        normalizeComparableText(
+            candidate.title
+        );
+
+    const snippet =
+        normalizeComparableText(
+            candidate.snippet
+        );
+
+    let score = 0;
+
+
+    // Exact domain brand match.
+    if (
+        normalizedDomain ===
+        normalizedSender
+    ) {
+
+        score += 0.50;
+
+    } else if (
+        normalizedDomain.includes(
+            normalizedSender
+        )
+    ) {
+
+        score += 0.30;
+    }
+
+
+    // Exact title match.
+    if (
+        title ===
+        normalizedSender
+    ) {
+
+        score += 0.35;
+
+    } else if (
+        title.includes(
+            normalizedSender
+        )
+    ) {
+
+        score += 0.20;
+    }
+
+
+    // Search snippet relevance.
+    if (
+        snippet.includes(
+            normalizedSender
+        )
+    ) {
+
+        score += 0.10;
+    }
+
+
+    // Official wording is useful.
+    if (
+        title.includes("official") ||
+        snippet.includes("official")
+    ) {
+
+        score += 0.05;
+    }
+
+
+    return Math.min(
+        score,
+        1
+    );
+}
+
+
+// ============================================================
+// SEARCH CANDIDATE DEDUPLICATION
+// ============================================================
+
+function dedupeSearchCandidates(
+    candidates,
+    sender
+) {
+
+    const byDomain =
+        new Map();
+
+    for (
+        const candidate of candidates
+    ) {
+
+        if (
+            !candidate ||
+            !candidate.url
+        ) {
+            continue;
+        }
+
+
+        if (
+            !isUsableExternalUrl(
+                candidate.url
+            )
+        ) {
+            continue;
+        }
+
+
+        const domain =
+            registrableDomainFromUrl(
+                candidate.url
+            );
+
+        if (!domain) {
+            continue;
+        }
+
+
+        const searchScore =
+            scoreSearchCandidate(
+                candidate,
+                sender
+            );
+
+
+        const existing =
+            byDomain.get(
+                domain
+            );
+
+
+        if (
+            !existing ||
+            searchScore >
+                existing.searchScore
+        ) {
+
+            byDomain.set(
+                domain,
+                {
+                    ...candidate,
+                    searchScore
+                }
+            );
+        }
+    }
+
+
+    return [
+        ...byDomain.values()
+    ]
+        .sort(
+            (a, b) =>
+                b.searchScore -
+                a.searchScore
+        )
+        .slice(
+            0,
+            MAX_SEARCH_RESULTS
+        );
+}
+
+
+// ============================================================
+// SEARCH
+// ============================================================
+
+async function searchBrand(
+    sender
+) {
+
     const queries = [
         `"${sender}" official`,
-        `"${sender}" company`,
-        `"${sender}" website`,
-        `${sender} official website`
+        `"${sender}" official website`,
+        `${sender} company`,
+        `${sender} brand`
     ];
+
+
+    console.log(
+        `[SMS BRAND] Running ${queries.length * 2} search requests for "${sender}"`
+    );
+
 
     const tasks = [];
 
-    for (const query of queries) {
-        tasks.push(
-            searchDuckDuckGo(query)
-        );
+
+    for (
+        const query of queries
+    ) {
 
         tasks.push(
             searchBing(query)
         );
+
+        tasks.push(
+            searchDuckDuckGo(query)
+        );
     }
 
-    console.log(
-        `[SMS BRAND] Running ${tasks.length} search requests for "${sender}"`
-    );
 
     const settled =
         await Promise.allSettled(
             tasks
         );
 
-    const allResults = [];
 
-    for (const result of settled) {
+    const rawCandidates = [];
+
+
+    for (
+        const result of settled
+    ) {
+
         if (
             result.status ===
-                "fulfilled" &&
-            Array.isArray(
-                result.value
-            )
+            "fulfilled"
         ) {
-            allResults.push(
+
+            rawCandidates.push(
                 ...result.value
             );
         }
     }
 
-    const seen = new Set();
 
-    const unique = [];
-
-    for (const candidate of allResults) {
-        const normalizedUrl =
-            normalizeUrl(
-                candidate?.url
-            );
-
-        if (!normalizedUrl) {
-            continue;
-        }
-
-        if (
-            isBlockedSearchDomain(
-                normalizedUrl
-            )
-        ) {
-            continue;
-        }
-
-        if (
-            isBlockedSearchResultUrl(
-                normalizedUrl
-            )
-        ) {
-            continue;
-        }
-
-        const key =
-            normalizedUrl
-                .split("#")[0]
-                .replace(/\/$/, "")
-                .toLowerCase();
-
-        if (
-            seen.has(key)
-        ) {
-            continue;
-        }
-
-        seen.add(key);
-
-        unique.push({
-            ...candidate,
-            url: normalizedUrl
-        });
-    }
-
-    const limited =
-        unique.slice(
-            0,
-            MAX_SEARCH_RESULTS
+    const uniqueCandidates =
+        dedupeSearchCandidates(
+            rawCandidates,
+            sender
         );
 
+
     console.log(
-        `[SMS BRAND] Search produced ${allResults.length} raw candidates, ${unique.length} valid external candidates; inspecting ${limited.length}`
+        `[SMS BRAND] Search produced ${rawCandidates.length} raw candidates, ${uniqueCandidates.length} valid external candidates`
     );
 
-    return limited;
+
+    if (
+        uniqueCandidates.length === 0
+    ) {
+
+        console.log(
+            `[SMS BRAND] No search candidates found for "${sender}"`
+        );
+    }
+
+
+    return uniqueCandidates;
 }
 
 
@@ -1201,33 +1557,45 @@ async function searchBrand(sender) {
 // ============================================================
 
 async function inspectWebsite(
-    candidate
+    searchCandidate
 ) {
-    const websiteUrl =
-        websiteFromSearchCandidate(
-            candidate
-        );
 
-    if (!websiteUrl) {
+    const websiteUrl =
+        searchCandidate.url;
+
+    if (
+        !isUsableExternalUrl(
+            websiteUrl
+        )
+    ) {
         return null;
     }
 
+
     try {
+
         const response =
             await axios.get(
                 websiteUrl,
                 {
                     timeout: 7000,
+
                     maxContentLength:
                         MAX_HTML_BYTES,
+
                     maxBodyLength:
                         MAX_HTML_BYTES,
+
+                    responseType:
+                        "text",
+
                     headers: {
                         "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36",
-                        Accept:
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+                        "Accept":
                             "text/html,application/xhtml+xml"
                     },
+
                     validateStatus:
                         status =>
                             status >= 200 &&
@@ -1235,113 +1603,137 @@ async function inspectWebsite(
                 }
             );
 
+
         const html =
             String(
                 response.data || ""
             );
 
+
         if (!html) {
             return null;
         }
 
-        const title =
-            extractTitle(html);
 
-        const siteName =
-            extractMeta(
-                html,
-                "og:site_name"
+        let finalUrl =
+            websiteUrl;
+
+
+        try {
+
+            if (
+                response.request &&
+                response.request.res &&
+                response.request.res.responseUrl
+            ) {
+
+                finalUrl =
+                    response.request
+                        .res
+                        .responseUrl;
+            }
+
+        } catch {
+            // Keep original URL.
+        }
+
+
+        const title =
+            extractTitle(
+                html
             );
+
 
         const description =
-            extractMeta(
+            extractMetaContent(
                 html,
-                "description"
+                [
+                    "description",
+                    "og:description"
+                ]
             );
 
-        const canonicalUrl =
+
+        const ogSiteName =
+            extractMetaContent(
+                html,
+                [
+                    "og:site_name"
+                ]
+            );
+
+
+        const canonical =
             extractCanonical(
                 html,
-                websiteUrl
+                finalUrl
             );
 
-        const schema =
-            extractSchemaOrganization(
-                html,
-                websiteUrl
+
+        const jsonLdObjects =
+            extractJsonLdObjects(
+                html
             );
+
+
+        const jsonLdIdentity =
+            extractJsonLdIdentity(
+                jsonLdObjects
+            );
+
 
         const iconCandidates =
             extractIconCandidates(
                 html,
-                websiteUrl
+                finalUrl
             );
+
 
         const logoCandidates =
             extractLogoCandidates(
                 html,
-                websiteUrl
+                finalUrl
             );
 
-        const domain =
-            getDomainFromUrl(
-                websiteUrl
-            );
-
-        const registrableDomain =
-            getRegistrableDomain(
-                domain
-            );
-
-        const brandName =
-            cleanBrandName(
-                schema.name ||
-                siteName ||
-                inferBrandFromSearchCandidate(
-                    candidate
-                ) ||
-                (
-                    !isGenericWebsiteName(
-                        title
-                    )
-                        ? title
-                        : ""
-                ) ||
-                deriveDomainIdentityName(
-                    domain,
-                    registrableDomain
-                )
-            );
 
         return {
-            url: websiteUrl,
+            url: finalUrl,
+
+            registrableDomain:
+                registrableDomainFromUrl(
+                    finalUrl
+                ),
+
             title,
-            siteName,
+
             description,
-            canonicalUrl,
 
-            schemaName:
-                schema.name || "",
+            ogSiteName,
 
-            schemaUrl:
-                schema.url || "",
+            canonical,
 
-            schemaLogo:
-                schema.logo || "",
+            jsonLdName:
+                jsonLdIdentity.name,
 
-            sameAs:
-                schema.sameAs || [],
+            jsonLdUrl:
+                jsonLdIdentity.url,
 
-            iconCandidates,
+            jsonLdLogo:
+                safeUrl(
+                    jsonLdIdentity.logo,
+                    finalUrl
+                ) || "",
+
             logoCandidates,
 
-            domain,
-            registrableDomain,
+            iconCandidates,
 
-            brandName
+            searchCandidate
         };
+
     } catch (error) {
-        console.warn(
+
+        console.error(
             `[SMS BRAND] Website inspection failed for ${websiteUrl}:`,
             error.message
         );
@@ -1352,548 +1744,415 @@ async function inspectWebsite(
 
 
 // ============================================================
-// IMAGE VALIDATION
-// ============================================================
-
-function isValidImageSignature(
-    buffer
-) {
-    if (!Buffer.isBuffer(buffer)) {
-        return false;
-    }
-
-    // PNG
-    if (
-        buffer.length >= 8 &&
-        buffer
-            .subarray(0, 8)
-            .equals(
-                Buffer.from([
-                    0x89,
-                    0x50,
-                    0x4e,
-                    0x47,
-                    0x0d,
-                    0x0a,
-                    0x1a,
-                    0x0a
-                ])
-            )
-    ) {
-        return true;
-    }
-
-    // JPEG
-    if (
-        buffer.length >= 3 &&
-        buffer[0] === 0xff &&
-        buffer[1] === 0xd8 &&
-        buffer[2] === 0xff
-    ) {
-        return true;
-    }
-
-    // GIF
-    if (
-        buffer.length >= 6 &&
-        (
-            buffer
-                .subarray(0, 6)
-                .toString("ascii") ===
-                "GIF87a" ||
-            buffer
-                .subarray(0, 6)
-                .toString("ascii") ===
-                "GIF89a"
-        )
-    ) {
-        return true;
-    }
-
-    // WEBP
-    if (
-        buffer.length >= 12 &&
-        buffer
-            .subarray(0, 4)
-            .toString("ascii") ===
-            "RIFF" &&
-        buffer
-            .subarray(8, 12)
-            .toString("ascii") ===
-            "WEBP"
-    ) {
-        return true;
-    }
-
-    // BMP
-    if (
-        buffer.length >= 2 &&
-        buffer[0] === 0x42 &&
-        buffer[1] === 0x4d
-    ) {
-        return true;
-    }
-
-    // ICO
-    if (
-        buffer.length >= 4 &&
-        buffer[0] === 0x00 &&
-        buffer[1] === 0x00 &&
-        (
-            buffer[2] === 0x01 ||
-            buffer[2] === 0x02
-        ) &&
-        buffer[3] === 0x00
-    ) {
-        return true;
-    }
-
-    // AVIF / HEIF
-    if (
-        buffer.length >= 12 &&
-        buffer
-            .subarray(4, 12)
-            .toString("ascii")
-            .includes("ftyp")
-    ) {
-        return true;
-    }
-
-    return false;
-}
-
-
-async function validateRemoteImage(
-    imageUrl
-) {
-    if (!imageUrl) {
-        return false;
-    }
-
-    try {
-        const response =
-            await axios.get(
-                imageUrl,
-                {
-                    responseType:
-                        "arraybuffer",
-
-                    timeout: 5000,
-
-                    maxContentLength:
-                        MAX_IMAGE_BYTES,
-
-                    maxBodyLength:
-                        MAX_IMAGE_BYTES,
-
-                    headers: {
-                        "User-Agent":
-                            "Mozilla/5.0"
-                    },
-
-                    validateStatus:
-                        status =>
-                            status >= 200 &&
-                            status < 400
-                }
-            );
-
-        const contentType =
-            String(
-                response.headers?.[
-                    "content-type"
-                ] || ""
-            ).toLowerCase();
-
-        if (
-            !contentType.includes(
-                "image/"
-            )
-        ) {
-            return false;
-        }
-
-        if (
-            contentType.includes(
-                "svg"
-            )
-        ) {
-            return false;
-        }
-
-        const buffer =
-            Buffer.from(
-                response.data
-            );
-
-        return isValidImageSignature(
-            buffer
-        );
-    } catch {
-        return false;
-    }
-}
-
-
-// ============================================================
-// CANDIDATE SCORING
+// WEBSITE BRAND SCORING
 // ============================================================
 
 async function scoreWebsiteCandidate(
     website,
-    sender,
-    searchCandidate
+    sender
 ) {
-    let score = 0;
+
+    if (!website) {
+        return null;
+    }
+
 
     const normalizedSender =
-        normalizeSender(
-            sender
-        );
+        senderKey(sender);
 
-    const brand =
-        normalizeSender(
-            website.brandName
-        );
 
     const domain =
-        normalizeSender(
-            website.domain
+        website.registrableDomain
+            .split(".")[0] || "";
+
+
+    const normalizedDomain =
+        normalizeComparableText(
+            domain
         );
 
-    const registrableDomain =
-        normalizeSender(
-            website.registrableDomain
-        );
 
-    // Exact brand identity
+    const names = [
+        website.jsonLdName,
+        website.ogSiteName,
+        website.title,
+        website.description
+    ]
+        .filter(Boolean);
+
+
+    let score = 0;
+
+
+    // --------------------------------------------------------
+    // DOMAIN IDENTITY
+    // --------------------------------------------------------
+
     if (
-        brand &&
-        brand ===
-            normalizedSender
+        normalizedDomain ===
+        normalizedSender
     ) {
-        score += 0.35;
+
+        score += 0.30;
+
     } else if (
-        brand &&
-        (
-            brand.includes(
-                normalizedSender
-            ) ||
-            normalizedSender.includes(
-                brand
-            )
-        )
-    ) {
-        score += 0.20;
-    }
-
-    // Domain identity
-    if (
-        domain.includes(
-            normalizedSender
-        ) ||
-        registrableDomain.includes(
+        normalizedDomain.includes(
             normalizedSender
         )
     ) {
-        score += 0.25;
+
+        score += 0.15;
     }
 
-    // Search text
-    const searchText =
-        [
-            searchCandidate?.title,
-            searchCandidate?.snippet
-        ]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
 
-    if (
-        searchText.includes(
-            normalizedSender
-        )
-    ) {
-        score += 0.10;
-    }
+    // --------------------------------------------------------
+    // BRAND NAME IDENTITY
+    // --------------------------------------------------------
 
-    // Search candidate belongs to inspected website.
-    //
-    // This is useful evidence, but it is deliberately
-    // lower than the brand/domain identity signals.
-    if (
-        searchCandidate?.url
+    let exactBrandName = false;
+
+    for (
+        const name of names
     ) {
-        const candidateDomain =
-            getDomainFromUrl(
-                searchCandidate.url
+
+        const normalizedName =
+            normalizeComparableText(
+                name
             );
 
         if (
-            candidateDomain &&
-            getRegistrableDomain(
-                candidateDomain
-            ) ===
-                website.registrableDomain
+            normalizedName ===
+            normalizedSender
         ) {
-            score += 0.10;
+
+            score += 0.35;
+
+            exactBrandName = true;
+
+            break;
         }
     }
 
-    // Canonical identity
+
     if (
-        website.canonicalUrl
+        !exactBrandName
     ) {
-        const canonicalDomain =
-            getRegistrableDomain(
-                getDomainFromUrl(
-                    website.canonicalUrl
+
+        for (
+            const name of names
+        ) {
+
+            const normalizedName =
+                normalizeComparableText(
+                    name
+                );
+
+            if (
+                normalizedName.includes(
+                    normalizedSender
                 )
+            ) {
+
+                score += 0.20;
+
+                break;
+            }
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // SEARCH RELEVANCE
+    // --------------------------------------------------------
+
+    if (
+        website.searchCandidate
+    ) {
+
+        score +=
+            Math.min(
+                website.searchCandidate
+                    .searchScore || 0,
+                1
+            ) * 0.20;
+    }
+
+
+    // --------------------------------------------------------
+    // JSON-LD CORROBORATION
+    // --------------------------------------------------------
+
+    if (
+        website.jsonLdName
+    ) {
+
+        const normalizedJsonLdName =
+            normalizeComparableText(
+                website.jsonLdName
             );
 
         if (
-            canonicalDomain &&
-            canonicalDomain ===
-                website.registrableDomain
+            normalizedJsonLdName ===
+            normalizedSender
         ) {
+
+            score += 0.15;
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // CANONICAL DOMAIN
+    // --------------------------------------------------------
+
+    if (
+        website.canonical
+    ) {
+
+        const canonicalDomain =
+            registrableDomainFromUrl(
+                website.canonical
+            );
+
+        if (
+            canonicalDomain ===
+            website.registrableDomain
+        ) {
+
             score += 0.05;
         }
     }
 
-    // Schema.org organization name
-    if (
-        website.schemaName &&
-        normalizeSender(
-            website.schemaName
-        ) ===
-            normalizedSender
-    ) {
-        score += 0.15;
-    }
 
-    // Schema organization URL
+    // --------------------------------------------------------
+    // LOGO VALIDATION
+    // --------------------------------------------------------
+
+    const logoCandidates = [
+        website.jsonLdLogo,
+        ...website.logoCandidates
+    ]
+        .filter(Boolean)
+        .slice(0, 5);
+
+
+    const verifiedLogoUrl =
+        await findVerifiedImage(
+            logoCandidates
+        );
+
+
     if (
-        website.schemaUrl &&
-        getRegistrableDomain(
-            getDomainFromUrl(
-                website.schemaUrl
-            )
-        ) ===
-            website.registrableDomain
+        verifiedLogoUrl
     ) {
+
         score += 0.10;
     }
 
-    let verifiedLogo = false;
-    let verifiedFavicon = false;
 
-    // Schema logo
+    // --------------------------------------------------------
+    // FAVICON VALIDATION
+    // --------------------------------------------------------
+
+    const faviconCandidates =
+        website.iconCandidates
+            .filter(Boolean)
+            .slice(0, 5);
+
+
+    const verifiedFaviconUrl =
+        await findVerifiedImage(
+            faviconCandidates
+        );
+
+
     if (
-        website.schemaLogo
+        verifiedFaviconUrl
     ) {
-        verifiedLogo =
-            await validateRemoteImage(
-                website.schemaLogo
-            );
-    }
 
-    // HTML / OpenGraph logos
-    if (
-        !verifiedLogo &&
-        website.logoCandidates?.length
-    ) {
-        for (
-            const logoUrl
-            of website.logoCandidates
-        ) {
-            if (
-                await validateRemoteImage(
-                    logoUrl
-                )
-            ) {
-                verifiedLogo = true;
-                break;
-            }
-        }
-    }
-
-    // Favicon
-    if (
-        !verifiedLogo &&
-        website.iconCandidates?.length
-    ) {
-        for (
-            const iconUrl
-            of website.iconCandidates
-        ) {
-            if (
-                await validateRemoteImage(
-                    iconUrl
-                )
-            ) {
-                verifiedFavicon = true;
-                break;
-            }
-        }
-    }
-
-    if (verifiedLogo) {
-        score += 0.10;
-    }
-
-    if (verifiedFavicon) {
         score += 0.04;
     }
 
-    // Social identity / sameAs
-    const sameAsCount =
-        Array.isArray(
-            website.sameAs
-        )
-            ? website.sameAs.length
-            : 0;
+
+    // --------------------------------------------------------
+    // BRAND NAME
+    // --------------------------------------------------------
+
+    let brandName =
+        cleanBrandName(
+            website.jsonLdName ||
+            website.ogSiteName ||
+            website.title
+        );
+
 
     if (
-        sameAsCount > 0
+        !brandName &&
+        website.searchCandidate
     ) {
-        score += 0.05;
+
+        brandName =
+            cleanBrandName(
+                website.searchCandidate.title
+            );
     }
 
-    return {
-        score: Math.min(
+
+    score =
+        Math.min(
             score,
             1
-        ),
+        );
 
-        verifiedLogo,
-        verifiedFavicon
+
+    const verified =
+        score >= 0.80 &&
+        (
+            Boolean(
+                verifiedLogoUrl
+            ) ||
+            Boolean(
+                verifiedFaviconUrl
+            )
+        );
+
+
+    return {
+        brandName,
+
+        logoUrl:
+            verifiedLogoUrl || "",
+
+        faviconUrl:
+            verifiedFaviconUrl || "",
+
+        confidence:
+            Number(
+                score.toFixed(3)
+            ),
+
+        verified,
+
+        websiteUrl:
+            website.url,
+
+        registrableDomain:
+            website.registrableDomain,
+
+        searchCandidate:
+            website.searchCandidate
     };
 }
 
 
 // ============================================================
-// BEST CANDIDATE
+// FIND BEST WEBSITE
 // ============================================================
 
 async function findBestCandidate(
     sender,
-    candidates
+    searchCandidates
 ) {
-    const externalCandidates =
-        (
-            Array.isArray(candidates)
-                ? candidates
-                : []
-        ).filter(candidate => {
-            if (!candidate?.url) {
-                return false;
-            }
 
-            if (
-                isBlockedSearchDomain(
-                    candidate.url
-                )
-            ) {
-                console.log(
-                    `[SMS BRAND] Ignoring search-engine candidate: ${candidate.url}`
-                );
+    const ranked =
+        [
+            ...searchCandidates
+        ]
+            .sort(
+                (a, b) =>
+                    (
+                        b.searchScore || 0
+                    ) -
+                    (
+                        a.searchScore || 0
+                    )
+            )
+            .slice(
+                0,
+                MAX_CANDIDATES_TO_INSPECT
+            );
 
-                return false;
-            }
-
-            if (
-                isBlockedSearchResultUrl(
-                    candidate.url
-                )
-            ) {
-                return false;
-            }
-
-            return true;
-        });
-
-    const limited =
-        externalCandidates.slice(
-            0,
-            MAX_CANDIDATES_TO_INSPECT
-        );
 
     console.log(
-        `[SMS BRAND] Inspecting ${limited.length} website candidates for "${sender}"`
+        `[SMS BRAND] Inspecting ${ranked.length} website candidates for "${sender}"`
     );
 
-    const settled =
-        await Promise.allSettled(
-            limited.map(
-                async candidate => {
-                    const website =
-                        await inspectWebsite(
-                            candidate
-                        );
 
-                    if (!website) {
-                        return null;
-                    }
+    if (
+        ranked.length === 0
+    ) {
 
-                    if (
-                        isBlockedSearchDomain(
-                            website.url
-                        )
-                    ) {
-                        return null;
-                    }
+        return null;
+    }
 
-                    const score =
-                        await scoreWebsiteCandidate(
-                            website,
-                            sender,
-                            candidate
-                        );
 
-                    return {
-                        candidate,
-                        website,
-                        ...score
-                    };
-                }
+    const inspections =
+        await Promise.all(
+            ranked.map(
+                candidate =>
+                    inspectWebsite(
+                        candidate
+                    )
             )
         );
 
-    const scored = [];
 
-    for (
-        const result
-        of settled
+    const websites =
+        inspections
+            .filter(Boolean);
+
+
+    if (
+        websites.length === 0
     ) {
-        if (
-            result.status ===
-                "fulfilled" &&
-            result.value
-        ) {
-            scored.push(
-                result.value
-            );
-        }
+
+        return null;
     }
 
-    scored.sort(
-        (a, b) =>
-            b.score -
-            a.score
-    );
+
+    const scored =
+        await Promise.all(
+            websites.map(
+                website =>
+                    scoreWebsiteCandidate(
+                        website,
+                        sender
+                    )
+            )
+        );
+
+
+    const valid =
+        scored
+            .filter(Boolean)
+            .sort(
+                (a, b) =>
+                    b.confidence -
+                    a.confidence
+            );
+
+
+    if (
+        valid.length === 0
+    ) {
+
+        return null;
+    }
+
 
     const best =
-        scored[0] || null;
+        valid[0];
 
-    if (best) {
-        console.log(
-            `[SMS BRAND] Best candidate: ${best.website.domain} -> ${best.website.brandName} (score=${best.score.toFixed(3)})`
-        );
-    } else {
-        console.log(
-            `[SMS BRAND] No viable website candidate found for "${sender}"`
-        );
-    }
+
+    console.log(
+        `[SMS BRAND] Best candidate: ${best.registrableDomain} -> ${best.brandName} (score=${best.confidence})`
+    );
+
+
+    console.log(
+        `[SMS BRAND] Verification result for "${sender}": verified=${best.verified}, confidence=${best.confidence}, brand="${best.brandName}", logo=${Boolean(best.logoUrl)}, favicon=${Boolean(best.faviconUrl)}`
+    );
+
 
     return best;
 }
@@ -1903,171 +2162,335 @@ async function findBestCandidate(
 // FIREBASE CACHE
 // ============================================================
 
-function cacheKey(sender) {
-    return normalizeSender(
-        sender
-    ).replace(
-        /[.#$/[\]]/g,
-        "_"
-    );
-}
-
-
 async function getFirebaseCache(
     sender
 ) {
+
     const key =
-        cacheKey(sender);
+        senderKey(sender);
 
-    const snapshot =
-        await db
-            .ref(CACHE_PATH)
-            .child(key)
-            .get();
-
-    if (!snapshot.exists()) {
+    if (!key) {
         return null;
     }
 
-    const value =
-        snapshot.val();
 
-    // Valid FOUND result
-    if (
-        value.status ===
-        "FOUND"
-    ) {
+    const now =
+        Date.now();
+
+
+    // --------------------------------------------------------
+    // MEMORY CACHE
+    // --------------------------------------------------------
+
+    const memory =
+        memoryCache.get(key);
+
+
+    if (memory) {
+
         if (
-            value.cachedAt &&
-            Date.now() -
-                value.cachedAt >
-                VERIFIED_CACHE_TTL
+            memory.status ===
+            "FOUND"
         ) {
+
+            if (
+                now -
+                    memory.cachedAt <
+                VERIFIED_CACHE_TTL
+            ) {
+
+                return memory;
+            }
+
+        } else if (
+            memory.status ===
+            "DISCOVERING"
+        ) {
+
+            if (
+                now -
+                    memory.discoveryStartedAt <
+                DISCOVERY_LOCK_TTL
+            ) {
+
+                return memory;
+            }
+
+        } else if (
+            memory.status ===
+            "UNKNOWN"
+        ) {
+
+            if (
+                now -
+                    memory.cachedAt <
+                UNKNOWN_CACHE_TTL
+            ) {
+
+                return memory;
+            }
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // FIREBASE
+    // --------------------------------------------------------
+
+    try {
+
+        const snapshot =
+            await db
+                .ref(
+                    `${CACHE_PATH}/${key}`
+                )
+                .once("value");
+
+
+        const data =
+            snapshot.val();
+
+
+        if (!data) {
             return null;
         }
 
-        return value;
-    }
 
-    // Active discovery lock
-    if (
-        value.status ===
-        "DISCOVERING"
-    ) {
         if (
-            value.discoveryStartedAt &&
-            Date.now() -
-                value.discoveryStartedAt <
-                DISCOVERY_LOCK_TTL
+            data.status ===
+            "FOUND"
         ) {
-            return value;
+
+            if (
+                now -
+                    Number(
+                        data.cachedAt || 0
+                    ) <
+                VERIFIED_CACHE_TTL
+            ) {
+
+                memoryCache.set(
+                    key,
+                    data
+                );
+
+                return data;
+            }
+
+            return null;
         }
 
-        // IMPORTANT:
-        // Never return stale DISCOVERING.
-        // This allows a new request to acquire
-        // a fresh discovery lock.
+
+        if (
+            data.status ===
+            "DISCOVERING"
+        ) {
+
+            if (
+                now -
+                    Number(
+                        data.discoveryStartedAt ||
+                        0
+                    ) <
+                DISCOVERY_LOCK_TTL
+            ) {
+
+                memoryCache.set(
+                    key,
+                    data
+                );
+
+                return data;
+            }
+
+            return null;
+        }
+
+
+        if (
+            data.status ===
+            "UNKNOWN"
+        ) {
+
+            if (
+                now -
+                    Number(
+                        data.cachedAt || 0
+                    ) <
+                UNKNOWN_CACHE_TTL
+            ) {
+
+                memoryCache.set(
+                    key,
+                    data
+                );
+
+                return data;
+            }
+
+            return null;
+        }
+
+
+        return null;
+
+    } catch (error) {
+
+        console.error(
+            "[SMS BRAND] Firebase cache read failed:",
+            error.message
+        );
+
         return null;
     }
-
-    // UNKNOWN results are not treated as
-    // permanent discovery locks.
-    return value;
 }
 
+
+// ============================================================
+// SAVE CACHE
+// ============================================================
+
+async function saveFirebaseCache(
+    sender,
+    data
+) {
+
+    const key =
+        senderKey(sender);
+
+    if (!key) {
+        return;
+    }
+
+
+    const payload = {
+        ...data,
+        senderKey: key,
+        updatedAt: Date.now()
+    };
+
+
+    memoryCache.set(
+        key,
+        payload
+    );
+
+
+    try {
+
+        await db
+            .ref(
+                `${CACHE_PATH}/${key}`
+            )
+            .set(payload);
+
+    } catch (error) {
+
+        console.error(
+            "[SMS BRAND] Firebase cache write failed:",
+            error.message
+        );
+    }
+}
+
+
+// ============================================================
+// DISCOVERY LOCK
+// ============================================================
 
 async function acquireDiscoveryLock(
     sender
 ) {
+
     const key =
-        cacheKey(sender);
+        senderKey(sender);
 
-    const ref =
-        db
-            .ref(CACHE_PATH)
-            .child(key);
+    if (!key) {
+        return false;
+    }
 
-    let acquired = false;
 
-    await ref.transaction(
-        current => {
-            const now =
-                Date.now();
+    const now =
+        Date.now();
 
-            // Existing valid FOUND result
-            if (
-                current &&
-                current.status ===
-                    "FOUND" &&
-                current.cachedAt &&
-                now -
-                    current.cachedAt <
-                    VERIFIED_CACHE_TTL
-            ) {
-                return;
-            }
 
-            // Existing active discovery
-            if (
-                current &&
-                current.status ===
-                    "DISCOVERING" &&
-                current.discoveryStartedAt &&
-                now -
-                    current.discoveryStartedAt <
-                    DISCOVERY_LOCK_TTL
-            ) {
-                return;
-            }
+    let acquired =
+        false;
 
-            acquired = true;
 
-            return {
-                status:
-                    "DISCOVERING",
+    try {
 
-                brandName: "",
-                logoUrl: "",
-                faviconUrl: "",
+        await db
+            .ref(
+                `${CACHE_PATH}/${key}`
+            )
+            .transaction(
+                current => {
 
-                confidence: 0,
-                verified: false,
+                    if (
+                        current &&
+                        current.status ===
+                        "DISCOVERING" &&
+                        now -
+                            Number(
+                                current.discoveryStartedAt ||
+                                0
+                            ) <
+                        DISCOVERY_LOCK_TTL
+                    ) {
 
-                senderKey:
-                    normalizeSender(
-                        sender
-                    ),
+                        return;
+                    }
 
-                discoveryStartedAt:
-                    now
-            };
+
+                    acquired = true;
+
+
+                    return {
+                        status:
+                            "DISCOVERING",
+
+                        senderKey:
+                            key,
+
+                        discoveryStartedAt:
+                            now
+                    };
+                }
+            );
+
+
+        if (
+            acquired
+        ) {
+
+            memoryCache.set(
+                key,
+                {
+                    status:
+                        "DISCOVERING",
+
+                    senderKey:
+                        key,
+
+                    discoveryStartedAt:
+                        now
+                }
+            );
         }
-    );
-
-    return acquired;
-}
 
 
-async function saveCache(
-    sender,
-    value
-) {
-    const key =
-        cacheKey(sender);
+        return acquired;
 
-    await db
-        .ref(CACHE_PATH)
-        .child(key)
-        .set(value);
+    } catch (error) {
 
-    memoryCache.set(
-        key,
-        {
-            value,
-            cachedAt:
-                Date.now()
-        }
-    );
+        console.error(
+            "[SMS BRAND] Discovery lock failed:",
+            error.message
+        );
+
+        return false;
+    }
 }
 
 
@@ -2078,313 +2501,227 @@ async function saveCache(
 async function discoverBrand(
     sender
 ) {
-    const normalized =
-        normalizeSender(sender);
 
     console.log(
-        `[SMS BRAND] Starting discovery for "${normalized}"`
+        `[SMS BRAND] Starting discovery for "${sender}"`
     );
 
-    try {
-        const candidates =
-            await searchBrand(
-                normalized
-            );
 
-        if (
-            !candidates.length
-        ) {
-            console.log(
-                `[SMS BRAND] No search candidates found for "${normalized}"`
-            );
-
-            await saveCache(
-                normalized,
-                {
-                    status: "UNKNOWN",
-
-                    senderKey:
-                        normalized,
-
-                    brandName: "",
-                    logoUrl: "",
-                    faviconUrl: "",
-
-                    confidence: 0,
-                    verified: false,
-
-                    cachedAt:
-                        Date.now()
-                }
-            );
-
-            return;
-        }
-
-        const best =
-            await findBestCandidate(
-                normalized,
-                candidates
-            );
-
-        if (!best) {
-            await saveCache(
-                normalized,
-                {
-                    status: "UNKNOWN",
-
-                    senderKey:
-                        normalized,
-
-                    brandName: "",
-                    logoUrl: "",
-                    faviconUrl: "",
-
-                    confidence: 0,
-                    verified: false,
-
-                    cachedAt:
-                        Date.now()
-                }
-            );
-
-            return;
-        }
-
-        const website =
-            best.website;
-
-        const confidence =
-            Number(
-                best.score || 0
-            );
-
-        const brandName =
-            cleanBrandName(
-                website.brandName
-            );
-
-        let logoUrl = "";
-        let faviconUrl = "";
-
-        // ----------------------------------------------------
-        // Resolve actual verified logo
-        // ----------------------------------------------------
-
-        if (
-            website.schemaLogo &&
-            await validateRemoteImage(
-                website.schemaLogo
-            )
-        ) {
-            logoUrl =
-                website.schemaLogo;
-        }
-
-        if (
-            !logoUrl &&
-            website.logoCandidates?.length
-        ) {
-            for (
-                const candidateLogo
-                of website.logoCandidates
-            ) {
-                if (
-                    await validateRemoteImage(
-                        candidateLogo
-                    )
-                ) {
-                    logoUrl =
-                        candidateLogo;
-                    break;
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // Resolve favicon
-        // ----------------------------------------------------
-
-        if (
-            website.iconCandidates?.length
-        ) {
-            for (
-                const icon
-                of website.iconCandidates
-            ) {
-                if (
-                    await validateRemoteImage(
-                        icon
-                    )
-                ) {
-                    faviconUrl =
-                        icon;
-                    break;
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // FINAL VERIFICATION
-        // ----------------------------------------------------
-
-        const verified =
-            confidence >= 0.80 &&
-            Boolean(brandName) &&
-            (
-                Boolean(logoUrl) ||
-                Boolean(faviconUrl) ||
-                Boolean(
-                    website.schemaName
-                )
-            );
-
-        console.log(
-            `[SMS BRAND] Verification result for "${normalized}": verified=${verified}, confidence=${confidence.toFixed(3)}, brand="${brandName}", logo=${Boolean(logoUrl)}, favicon=${Boolean(faviconUrl)}`
+    const candidates =
+        await searchBrand(
+            sender
         );
 
-        // ----------------------------------------------------
-        // Not sufficiently verified
-        // ----------------------------------------------------
 
-        if (!verified) {
-            await saveCache(
-                normalized,
-                {
-                    status: "UNKNOWN",
+    if (
+        candidates.length === 0
+    ) {
 
-                    senderKey:
-                        normalized,
+        console.log(
+            `[SMS BRAND] No search candidates found for "${sender}"`
+        );
 
-                    brandName:
-                        brandName || "",
 
-                    logoUrl:
-                        logoUrl || "",
+        await saveFirebaseCache(
+            sender,
+            {
+                status:
+                    "UNKNOWN",
 
-                    faviconUrl:
-                        faviconUrl || "",
+                brandName:
+                    "",
 
-                    confidence,
+                logoUrl:
+                    "",
 
-                    verified: false,
+                faviconUrl:
+                    "",
 
-                    sourceDomain:
-                        website.domain || "",
+                confidence:
+                    0,
 
-                    registrableDomain:
-                        website.registrableDomain || "",
+                verified:
+                    false,
 
-                    canonicalUrl:
-                        website.canonicalUrl || "",
+                cachedAt:
+                    Date.now()
+            }
+        );
 
-                    schemaName:
-                        website.schemaName || "",
 
-                    schemaUrl:
-                        website.schemaUrl || "",
+        return {
+            status:
+                "UNKNOWN",
 
-                    schemaLogo:
-                        website.schemaLogo || "",
+            brandName:
+                "",
 
-                    cachedAt:
-                        Date.now()
-                }
-            );
+            logoUrl:
+                "",
 
-            return;
-        }
+            faviconUrl:
+                "",
 
-        // ----------------------------------------------------
-        // VERIFIED RESULT
-        // ----------------------------------------------------
+            confidence:
+                0,
 
-        const now =
-            Date.now();
-
-        const result = {
-            status: "FOUND",
-
-            senderKey:
-                normalized,
-
-            brandName,
-
-            logoUrl,
-
-            faviconUrl,
-
-            confidence,
-
-            verified: true,
-
-            sourceDomain:
-                website.domain || "",
-
-            registrableDomain:
-                website.registrableDomain || "",
-
-            canonicalUrl:
-                website.canonicalUrl || "",
-
-            schemaName:
-                website.schemaName || "",
-
-            schemaUrl:
-                website.schemaUrl || "",
-
-            schemaLogo:
-                website.schemaLogo || "",
-
-            lastVerifiedAt:
-                now,
-
-            cachedAt:
-                now
+            verified:
+                false
         };
-
-        await saveCache(
-            normalized,
-            result
-        );
-
-        console.log(
-            `[SMS BRAND] FOUND "${normalized}" -> "${brandName}"`
-        );
-
-    } catch (error) {
-        console.error(
-            `[SMS BRAND] Discovery failed for "${normalized}":`,
-            error
-        );
-
-        try {
-            await saveCache(
-                normalized,
-                {
-                    status: "UNKNOWN",
-
-                    senderKey:
-                        normalized,
-
-                    brandName: "",
-                    logoUrl: "",
-                    faviconUrl: "",
-
-                    confidence: 0,
-                    verified: false,
-
-                    cachedAt:
-                        Date.now()
-                }
-            );
-        } catch (cacheError) {
-            console.error(
-                "[SMS BRAND] Failed to save UNKNOWN cache:",
-                cacheError
-            );
-        }
     }
+
+
+    const best =
+        await findBestCandidate(
+            sender,
+            candidates
+        );
+
+
+    if (
+        !best
+    ) {
+
+        await saveFirebaseCache(
+            sender,
+            {
+                status:
+                    "UNKNOWN",
+
+                brandName:
+                    "",
+
+                logoUrl:
+                    "",
+
+                faviconUrl:
+                    "",
+
+                confidence:
+                    0,
+
+                verified:
+                    false,
+
+                cachedAt:
+                    Date.now()
+            }
+        );
+
+
+        return {
+            status:
+                "UNKNOWN",
+
+            brandName:
+                "",
+
+            logoUrl:
+                "",
+
+            faviconUrl:
+                "",
+
+            confidence:
+                0,
+
+            verified:
+                false
+        };
+    }
+
+
+    if (
+        !best.verified
+    ) {
+
+        await saveFirebaseCache(
+            sender,
+            {
+                status:
+                    "UNKNOWN",
+
+                brandName:
+                    best.brandName || "",
+
+                logoUrl:
+                    best.logoUrl || "",
+
+                faviconUrl:
+                    best.faviconUrl || "",
+
+                confidence:
+                    best.confidence || 0,
+
+                verified:
+                    false,
+
+                websiteUrl:
+                    best.websiteUrl || "",
+
+                cachedAt:
+                    Date.now()
+            }
+        );
+
+
+        return {
+            status:
+                "UNKNOWN",
+
+            brandName:
+                best.brandName || "",
+
+            logoUrl:
+                best.logoUrl || "",
+
+            faviconUrl:
+                best.faviconUrl || "",
+
+            confidence:
+                best.confidence || 0,
+
+            verified:
+                false
+        };
+    }
+
+
+    const result = {
+
+        status:
+            "FOUND",
+
+        brandName:
+            best.brandName,
+
+        logoUrl:
+            best.logoUrl,
+
+        faviconUrl:
+            best.faviconUrl,
+
+        confidence:
+            best.confidence,
+
+        verified:
+            true,
+
+        websiteUrl:
+            best.websiteUrl,
+
+        cachedAt:
+            Date.now()
+    };
+
+
+    await saveFirebaseCache(
+        sender,
+        result
+    );
+
+
+    return result;
 }
 
 
@@ -2395,61 +2732,37 @@ async function discoverBrand(
 async function resolveSender(
     sender
 ) {
+
     const normalized =
         normalizeSender(sender);
 
+
     if (!normalized) {
+
         return {
-            status: "UNKNOWN",
-            brandName: "",
-            logoUrl: "",
-            faviconUrl: "",
-            confidence: 0,
-            verified: false
+            status:
+                "UNKNOWN",
+
+            brandName:
+                "",
+
+            logoUrl:
+                "",
+
+            faviconUrl:
+                "",
+
+            confidence:
+                0,
+
+            verified:
+                false
         };
     }
 
-    const key =
-        cacheKey(normalized);
 
     // --------------------------------------------------------
-    // 1. MEMORY CACHE
-    // --------------------------------------------------------
-
-    const memory =
-        memoryCache.get(key);
-
-    if (memory) {
-        const value =
-            memory.value;
-
-        if (
-            value.status ===
-                "FOUND" &&
-            value.cachedAt &&
-            Date.now() -
-                value.cachedAt <
-                VERIFIED_CACHE_TTL
-        ) {
-            return value;
-        }
-
-        if (
-            value.status ===
-                "DISCOVERING" &&
-            value.discoveryStartedAt &&
-            Date.now() -
-                value.discoveryStartedAt <
-                DISCOVERY_LOCK_TTL
-        ) {
-            return value;
-        }
-
-        memoryCache.delete(key);
-    }
-
-    // --------------------------------------------------------
-    // 2. FIREBASE CACHE
+    // CHECK CACHE
     // --------------------------------------------------------
 
     const cached =
@@ -2457,28 +2770,75 @@ async function resolveSender(
             normalized
         );
 
-    if (cached) {
-        memoryCache.set(
-            key,
-            {
-                value: cached,
-                cachedAt:
-                    Date.now()
-            }
+
+    if (
+        cached &&
+        cached.status ===
+        "FOUND"
+    ) {
+
+        console.log(
+            `[SMS BRAND] Cache HIT for "${normalized}"`
         );
 
-        if (
-            cached.status ===
-                "FOUND" ||
-            cached.status ===
-                "DISCOVERING"
-        ) {
-            return cached;
-        }
+        return cached;
     }
 
+
+    if (
+        cached &&
+        cached.status ===
+        "UNKNOWN"
+    ) {
+
+        console.log(
+            `[SMS BRAND] UNKNOWN cache HIT for "${normalized}"`
+        );
+
+        return cached;
+    }
+
+
+    if (
+        cached &&
+        cached.status ===
+        "DISCOVERING"
+    ) {
+
+        console.log(
+            `[SMS BRAND] Discovery already running for "${normalized}"`
+        );
+
+        return {
+            status:
+                "DISCOVERING",
+
+            senderKey:
+                senderKey(normalized),
+
+            brandName:
+                "",
+
+            logoUrl:
+                "",
+
+            faviconUrl:
+                "",
+
+            confidence:
+                0,
+
+            verified:
+                false,
+
+            discoveryStartedAt:
+                cached.discoveryStartedAt
+        };
+    }
+
+
     // --------------------------------------------------------
-    // 3. ACQUIRE DISCOVERY LOCK
+    // ACQUIRE LOCK
     // --------------------------------------------------------
 
     const acquired =
@@ -2486,84 +2846,102 @@ async function resolveSender(
             normalized
         );
 
-    if (!acquired) {
-        const current =
-            await getFirebaseCache(
-                normalized
-            );
 
-        if (current) {
-            return current;
-        }
+    if (!acquired) {
 
         return {
             status:
                 "DISCOVERING",
 
             senderKey:
-                normalized,
+                senderKey(normalized),
 
-            brandName: "",
-            logoUrl: "",
-            faviconUrl: "",
+            brandName:
+                "",
 
-            confidence: 0,
-            verified: false
+            logoUrl:
+                "",
+
+            faviconUrl:
+                "",
+
+            confidence:
+                0,
+
+            verified:
+                false
         };
     }
 
+
     // --------------------------------------------------------
-    // 4. BACKGROUND DISCOVERY
+    // DISCOVER
     // --------------------------------------------------------
 
-    const discovering = {
-        status:
-            "DISCOVERING",
+    try {
 
-        senderKey:
-            normalized,
-
-        brandName: "",
-        logoUrl: "",
-        faviconUrl: "",
-
-        confidence: 0,
-        verified: false,
-
-        discoveryStartedAt:
-            Date.now()
-    };
-
-    memoryCache.set(
-        key,
-        {
-            value: discovering,
-            cachedAt:
-                Date.now()
-        }
-    );
-
-    setImmediate(() => {
-        discoverBrand(
+        return await discoverBrand(
             normalized
-        ).catch(error => {
-            console.error(
-                `[SMS BRAND] Background discovery error for "${normalized}":`,
-                error
-            );
-        });
-    });
+        );
 
-    return discovering;
+    } catch (error) {
+
+        console.error(
+            `[SMS BRAND] Discovery failed for "${normalized}":`,
+            error
+        );
+
+
+        await saveFirebaseCache(
+            normalized,
+            {
+                status:
+                    "UNKNOWN",
+
+                brandName:
+                    "",
+
+                logoUrl:
+                    "",
+
+                faviconUrl:
+                    "",
+
+                confidence:
+                    0,
+
+                verified:
+                    false,
+
+                cachedAt:
+                    Date.now()
+            }
+        );
+
+
+        return {
+            status:
+                "UNKNOWN",
+
+            brandName:
+                "",
+
+            logoUrl:
+                "",
+
+            faviconUrl:
+                "",
+
+            confidence:
+                0,
+
+            verified:
+                false
+        };
+    }
 }
 
 
-// ============================================================
-// EXPORTS
-// ============================================================
-
 module.exports = {
-    resolveSender,
-    discoverBrand,
-    normalizeSender
+    resolveSender
 };
